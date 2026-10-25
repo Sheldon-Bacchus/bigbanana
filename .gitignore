@@ -17,6 +17,9 @@ dist-ssr
 .env
 .env.local
 
+# AGY bridge runtime registration (contains per-session token)
+.mcp.json
+
 # Big demo assets (optional, restored by scripts/sync-demo-assets.ps1)
 public/demo.json
 public/sproj_*.json
