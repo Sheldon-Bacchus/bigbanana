@@ -1,0 +1,38 @@
+BigBanana Fork Studio
+=====================
+
+本作品是 BigBanana AI Director 的衍生作品（fork），用于个人、非商业的影视/短剧创作实验。
+
+上游来源
+--------
+- 名称：BigBanana AI Director（AI 漫剧导演工场）
+- 基线归档：E:\all-agent-workspace\archive\legacy-agv-root-20260916\apps\bigbanana-ai-director
+- 归档 git 提交：09ea5ef012b8ea3080389605d0651de9bae07f57（2026-09-09）
+- 原始许可证：Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+  （CC BY-NC-SA 4.0，见本仓库 LICENSE）
+
+本衍生作品的许可
+----------------
+- 整体按 CC BY-NC-SA 4.0 分发：署名、非商业性使用、相同方式共享。
+- 不得将本作品或其衍生作品用于商业目的。
+- 分发修改版本时必须保留本 NOTICE、LICENSE 与上游署名，并注明修改内容。
+- 不得附加法律条款或技术措施（DRM）限制他人行使许可证授予的权利。
+
+修改说明（相对上游基线）
+------------------------
+1. 仓库更名与产品定位为「BigBanana Fork Studio」，作为独立产品仓维护。
+2. 启动方式改为原生 Windows 脚本：开发固定 5173、生产固定 3005（strictPort）。
+3. 移除 Docker / nginx 部署方式，改为 Node 静态服务器 + 同源代理。
+4. 计划扩展 InfiniteCanvas 为可生成、可回写的持久化节点图（v4 schema）。
+5. 计划以 clean-room 方式实现与外部导演台的 projection / commit 契约。
+
+保留的第三方服务
+----------------
+- 默认模型/账号服务端点保留为 https://api.antsk.cn（new-api）。
+- 任何自定义端点不得删除该默认值；使用第三方服务须遵守其条款。
+
+免责声明
+--------
+本软件按「现状」提供，不附带任何明示或暗示的担保。使用者自行承担模型调用费用、
+数据丢失、生成内容合规与版权责任。IndexedDB/OPFS 数据绑定浏览器 origin，
+更换端口、域名或浏览器会导致旧数据不可见。

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>BigBanana AI Director · 自动载入 SpecKit EP003 工程</title>
+  <style>
+    body {
+      margin: 0;
+      background: #09090b;
+      color: #fafafa;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+    }
+    .card {
+      background: #18181b;
+      border: 1px solid #27272a;
+      padding: 32px 40px;
+      border-radius: 8px;
+      text-align: center;
+      max-width: 520px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+    }
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid #3f3f46;
+      border-top-color: #eab308;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    h2 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+    p { margin: 0; font-size: 13px; color: #a1a1aa; line-height: 1.6; }
+    .status { margin-top: 16px; font-family: monospace; font-size: 12px; color: #eab308; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="spinner"></div>
+    <h2>BigBanana AI Director</h2>
+    <p>正在载入《古嘎×豆若：开学喜剧段》（SpecKit EP003 闭环工程 · 含 12 份真实网络素材、三视图、5 镜分镜与对白配音）...</p>
+    <div class="status" id="status">正在读取项目工程包...</div>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const DB_NAME = 'BigBananaDB';
+    const DB_VERSION = 3;
+
+    function openDB() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onerror = () => reject(req.error);
+        req.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('projects')) db.createObjectStore('projects', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('assetLibrary')) db.createObjectStore('assetLibrary', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('seriesProjects')) db.createObjectStore('seriesProjects', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('series')) {
+            const s = db.createObjectStore('series', { keyPath: 'id' });
+            s.createIndex('projectId', 'projectId', { unique: false });
+          }
+          if (!db.objectStoreNames.contains('episodes')) {
+            const ep = db.createObjectStore('episodes', { keyPath: 'id' });
+            ep.createIndex('projectId', 'projectId', { unique: false });
+            ep.createIndex('seriesId', 'seriesId', { unique: false });
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+      });
+    }
+
+    async function run() {
+      try {
+        statusEl.innerText = '正在加载本地 demo.json...';
+        const res = await fetch('/demo.json?t=' + Date.now());
+        if (!res.ok) throw new Error('无法读取 /demo.json: ' + res.statusText);
+        const payload = await res.json();
+
+        statusEl.innerText = '正在写入本地数据库 (IndexedDB)...';
+        const db = await openDB();
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const projectId = urlParams.get('projectId') || 'sproj_mtrxsuxg_bba7';
+        const episodeId = urlParams.get('episodeId') || ('ep_' + projectId.replace(/^sproj_/, ''));
+
+        const tx = db.transaction(['projects', 'seriesProjects', 'series', 'episodes', 'assetLibrary'], 'readwrite');
+
+        if (payload.stores) {
+          for (const storeName of ['seriesProjects', 'series', 'episodes', 'projects', 'assetLibrary']) {
+            if (payload.stores[storeName] && db.objectStoreNames.contains(storeName)) {
+              const store = tx.objectStore(storeName);
+              for (const item of payload.stores[storeName]) {
+                store.put(item);
+              }
+            }
+          }
+        } else if (payload.stores?.projects?.[0]) {
+          const p = payload.stores.projects[0];
+          tx.objectStore('projects').put(p);
+        }
+
+        await new Promise((resolve, reject) => {
+          tx.oncomplete = resolve;
+          tx.onerror = () => reject(tx.error);
+        });
+
+        statusEl.innerText = '导入成功！正在进入工作台...';
+        setTimeout(() => {
+          window.location.href = '/project/' + projectId + '/episode/' + episodeId;
+        }, 500);
+
+      } catch (err) {
+        console.error(err);
+        statusEl.style.color = '#ef4444';
+        statusEl.innerText = '导入异常: ' + err.message;
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
