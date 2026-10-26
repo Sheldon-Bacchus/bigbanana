@@ -4,7 +4,12 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $runDir = Join-Path $root '.run'
 $logDir = Join-Path $root 'logs'
-New-Item -ItemType Directory -Force -Path $runDir, $logDir | Out-Null
+$tempDir = Join-Path $root '.tmp'
+New-Item -ItemType Directory -Force -Path $runDir, $logDir, $tempDir | Out-Null
+
+# esbuild 在系统 Temp 下可能因 ACL/占用无法删除临时文件；dev 统一使用项目内 .tmp
+$env:TEMP = $tempDir
+$env:TMP = $tempDir
 
 $port = 5173
 $pidFile = Join-Path $runDir 'dev.pid'
