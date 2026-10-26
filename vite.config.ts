@@ -90,8 +90,10 @@ export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     return {
       server: {
-        port: 3000,
-        host: '0.0.0.0',
+        // 开发 origin 固定为 http://127.0.0.1:5173（正式数据在 3005，两者是独立 IndexedDB）
+        port: 5173,
+        strictPort: true,
+        host: '127.0.0.1',
       },
       plugins: [react(), createDevMediaProxyPlugin(), createDevNewApiProxyPlugin()],
       define: {
