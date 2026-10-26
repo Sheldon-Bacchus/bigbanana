@@ -13,7 +13,8 @@ foreach ($name in @('prod', 'dev')) {
 
   $procId = (Get-Content $pidFile -Raw).Trim()
   if ($procId -match '^\d+$' -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
-    taskkill /PID $procId /T /F | Out-Null
+    taskkill.exe /PID $procId /T /F 2>$null | Out-Null
+    Stop-Process -Id ([int]$procId) -Force -ErrorAction SilentlyContinue
     Write-Host "已停止 $name (PID $procId)"
   } else {
     Write-Host "$name 进程不存在，清理 PID 文件"
@@ -24,6 +25,15 @@ foreach ($name in @('prod', 'dev')) {
 foreach ($port in @(3005, 5173)) {
   $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($listener) {
-    Write-Host "警告：端口 $port 仍被 PID $($listener.OwningProcess) 占用" -ForegroundColor Yellow
+    $listenerPid = [int]$listener.OwningProcess
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$listenerPid" -ErrorAction SilentlyContinue
+    $commandLine = $proc.CommandLine
+    if ($commandLine -and $commandLine -like "*$root*") {
+      taskkill.exe /PID $listenerPid /T /F 2>$null | Out-Null
+      Stop-Process -Id $listenerPid -Force -ErrorAction SilentlyContinue
+      Write-Host "已清理本项目残留进程 (PID $listenerPid, 端口 $port)"
+    } else {
+      Write-Host "警告：端口 $port 被外部进程 PID $listenerPid 占用，未自动终止；请人工确认。" -ForegroundColor Yellow
+    }
   }
 }
