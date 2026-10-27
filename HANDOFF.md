@@ -69,14 +69,17 @@ E:\all-agent-workspace\BigBanana/
   - 4 个 PowerShell 脚本已通过语法树解析校验；
   - 端口约定强固：开发态强制 5173，生产态强制 3005；生产态自动探测 `dist/` 存在性并提供友好构建引导。
 
-### 2.3 已完成切片（2026-10-27：C2 + C4 + P3）
+### 2.3 已完成切片（2026-10-27：C2–C7 全部交付并验收）
 - **C2 数据权威（commit `b3d24fd`）**：BigBananaDB v3→v4（9 个 Object Store）；`runV3ToV4Migration` 幂等迁移（legacy `imageCanvas/videoCanvas` → `canvas_graphs`，keyframe/interval → `media_versions` v1 基线）；三导出覆盖 9 store 且按 scope 过滤，导入兼容 v2/v3 旧包。真实浏览器实测：v3 种子库打开应用后自动升至 v4，9 store 齐备，2 图与 2 条版本基线正确。
 - **C4 可生成画布（commit `b3d24fd`）**：InfiniteCanvas 解除 inspect-only；`CanvasGraphEntity` 单一真源 + 600ms 防抖 `saveCanvasGraph`；5 类节点、SVG 贝塞尔连线、自环/重复边/端点禁连/DFS 环检测、级联删边。真实浏览器 E2E：项目→分集→画布→新增配置节点→落库 nodes 0→4、edges 0→2。
 - **P3 级联清理（commit `1567e5b`）**：`deleteEpisode` 在同一读写事务中清理该分集的 `canvas_graphs` 与 `generation_tasks`，不留孤儿。
 - **C3 任务中心（commit `85bc199`）**：`generation_tasks` 持久化队列（最多 2 个 running、retry/cancel 状态机、10 分钟 interrupted 自愈、1.5s 订阅清理）；任务中心抽屉与顶部动态徽标；`server/newApiProxyCore.mjs` 增加 SSE 透传 + 15s 心跳 + 客户端断开 abort（JSON 路径不变）；`services/generationAdapter.ts` 统一复用现有 aiService。浏览器 E2E：抽屉打开（运行中 0/2、5 类分组、空态）。
 - **C5 双轨互通（commit `f693902`）**：幂等投影（FNV-1a 稳定节点 ID、保留用户已有坐标、参考→镜头→产物连线）；Diff 写回（`StaleCommitError` 过期强阻断、同一 IndexedDB 事务内完成版本翻转+新版本+CommitRecord、版本历史与只改 isCurrent 的回滚、批量写回错误隔离）。浏览器 E2E：投影两次节点数不变（image 4/2、video 5/3）；确认写回后 `media_versions` v2 isCurrent=true + `commit_records` applied。
-- **质量门**：`npx tsc --noEmit=0`、`npm run check:utf8=0`（290 files）、`npm run build=0`；C2/C3/C4/C5 独立复审 PASS（C5 P1-1 已修复为原子事务）；Q01–Q03 运行态 13 项 PASS；clean-room/许可证审计 PASS（零 ELv2/异构残留，15 个基线哈希一致）。
-- **验证证据（本地，未入 Git）**：`.scratch/swarm/` 下 `c2-db-report.md`、`c2-review.md`、`c3-taskcenter.md`、`c3-adapter.md`、`c3-review.md`、`c4-report.md`、`c4-review.md`、`c5-projection.md`、`c5-commit.md`、`c5-review.md`、`acceptance-matrix.md`、`ops-verification.md`、`license-audit.md`、`e2e-canvas-lead-report.md`、`e2e-c3-c5-lead-report.md`、`e2e-taskcenter.png`、`e2e-commit-dialog.png`、`e2e-projection.png`、`e2e-canvas.png`。
+- **T12 配额与多标签（commit `f0a8425`）**：`storageQuotaService`（80%/95% 阈值、estimate 缺失安全降级）+ `storageBusService`（`bigbanana_storage_bus`、senderId 防回环、可反注册、no-op 降级）+ `StorageHealthBanner`（配额预警 + 外部修改重载提示）；写库仅在事务 `oncomplete` 广播，接收端只提示不写库。
+- **T25 便携归档（commit `f0a8425`）**：`portableArchiveService` 以二进制 zip（project.json + media/*）导出，`safeEpisode` 阻断 Base64 膨胀；回导经 OPFS 恢复并重映射引用。实机：zip 2,257B、mediaCount 2、mediaRestored 2。
+- **C7 综合验收（Q01–Q10）**：双环境 5173/3005 全部 PASS；Q08 Stale/批量写回、Q09 JSON 导出导入 + 便携包均有浏览器实测；`tsc=0 / check:utf8=0 / build=0`；`specs/006/tasks.md` T01–T28 已全部勾选，`checklists/requirements.md` Q01–Q10 全部勾选。
+- **质量门**：`npx tsc --noEmit=0`、`npm run check:utf8=0`（317 files）、`npm run build=0`；C2/C3/C4/C5/T12/T25 独立复审 PASS（C5 P1-1 已修复为原子事务；Q08 发现的批量按钮文案问题已修复）；Q01–Q10 全部 PASS；clean-room/许可证审计 PASS。
+- **验证证据（本地，未入 Git）**：`.scratch/swarm/` 下 `c2-review.md`、`c3-review.md`、`c4-review.md`、`c5-review.md`、`t12-t25-review.md`、`acceptance-matrix.md`、`ops-verification.md`、`license-audit.md`、`q08-e2e.md`、`q09-json-e2e.md`、`t25-archive.md`、`c7-acceptance.md` 与 `e2e-*` / `c7-*` / `q08-*` / `q09-*` 截图。
 
 ---
 
@@ -107,21 +110,23 @@ E:\all-agent-workspace\BigBanana/
 
 ---
 
-## 四、后续迭代路线图与执行切片 (C2 – C7 Implementation Slices)
+## 四、迭代路线图与完成状态 (C0 – C7)
 
-后续接手团队应按照以下依赖拓扑顺序推进开发：
+C0–C7 已全部完成；以下为依赖拓扑与最终状态：
 
 ```mermaid
 flowchart TD
     C0["C0: 底座与合规 (已完成)"] --> C1["C1: 原生启停与代理 (已完成)"]
-    C1 --> C2["C2: 数据权威 (IndexedDB v3→v4)"]
-    C2 --> C3["C3: 导演工作台实体增强 (稳定 UUID)"]
-    C2 --> C4["C4: 无限画布可生成改造 (Generative Canvas)"]
-    C3 --> C5["C5: 双轨双向互通 (Projection & Commit)"]
+    C1 --> C2["C2: 数据权威 IndexedDB v4 (已完成)"]
+    C2 --> C3["C3: 任务中心与运行时网关 (已完成)"]
+    C2 --> C4["C4: 无限画布可生成 (已完成)"]
+    C3 --> C5["C5: 双轨投影与写回 (已完成)"]
     C4 --> C5
-    C5 --> C6["C6: 任务中心与同源模型接入"]
-    C6 --> C7["C7: Q01-Q10 全链路综合验收"]
+    C5 --> C6["C6: 导入导出与便携归档 (已完成)"]
+    C6 --> C7["C7: Q01-Q10 综合验收 (已完成)"]
 ```
+
+**状态（2026-10-27）**：SDD 006 收口完成——`specs/006/tasks.md` T01–T28 全部勾选，`checklists/requirements.md` Q01–Q10 全部 PASS。
 
 ### 切片 1：C2 数据权威与存储模型升级 (预计 1-2 天)
 - **目标**：在不破坏历史工程的前提下，将 `BigBananaDB` 的 `schemaVersion` 由 3 增量升级至 4。
