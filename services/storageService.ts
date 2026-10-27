@@ -810,6 +810,21 @@ export const listGenerationTasks = async (graphId: string): Promise<GenerationTa
   });
 };
 
+export const listAllGenerationTasks = async (): Promise<GenerationTaskEntity[]> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(GENERATION_TASK_STORE, 'readonly');
+    const store = tx.objectStore(GENERATION_TASK_STORE);
+    const req = store.getAll();
+    req.onsuccess = () => {
+      const results = (req.result as GenerationTaskEntity[]) || [];
+      results.sort((a, b) => b.createdAt - a.createdAt);
+      resolve(results);
+    };
+    req.onerror = () => reject(req.error);
+  });
+};
+
 export const saveGenerationTask = async (task: GenerationTaskEntity): Promise<void> => {
   const db = await openDB();
   const normalized: GenerationTaskEntity = {

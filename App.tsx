@@ -12,9 +12,11 @@ import CharacterLibraryPage from './components/CharacterLibrary';
 import NewApiConsole from './components/NewApiConsole';
 import Onboarding, { shouldShowOnboarding, resetOnboarding } from './components/Onboarding';
 import ModelConfigModal from './components/ModelConfig';
+import { TaskCenterDrawer } from './components/TaskCenter';
 import { ProjectState } from './types';
-import { Save, CheckCircle, Maximize2 } from 'lucide-react';
+import { Save, CheckCircle, Maximize2, ListTodo } from 'lucide-react';
 import { saveEpisode, loadEpisode } from './services/storageService';
+import { taskCenterService } from './services/taskCenterService';
 import { setGlobalApiKey } from './services/aiService';
 import { setLogCallback, clearLogCallback } from './services/renderLogService';
 import { useAlert } from './components/GlobalAlert';
@@ -112,9 +114,23 @@ function EpisodeWorkspace() {
   const [showSaveStatus, setShowSaveStatus] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showModelConfig, setShowModelConfig] = useState(false);
+  const [showTaskCenter, setShowTaskCenter] = useState(false);
+  const [activeTaskCount, setActiveTaskCount] = useState(0);
   const [canvasMode, setCanvasMode] = useState<CanvasEntryMode | null>(null);
   const saveTimeoutRef = useRef<any>(null);
   const hideStatusTimeoutRef = useRef<any>(null);
+
+  useEffect(() => {
+    const unsubscribe = taskCenterService.subscribe((tasks) => {
+      const active = tasks.filter(
+        (t) => t.status === 'queued' || t.status === 'running'
+      ).length;
+      setActiveTaskCount(active);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     if (!episodeId) return;
@@ -298,6 +314,20 @@ function EpisodeWorkspace() {
           <div className="absolute top-4 right-28 z-40 flex items-center gap-2">
             <button
               type="button"
+              onClick={() => setShowTaskCenter(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--border-primary)] bg-[var(--bg-elevated)]/90 hover:bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] shadow-sm backdrop-blur transition-all active:scale-95"
+              title="打开任务中心"
+            >
+              <ListTodo className="w-3.5 h-3.5 text-[var(--accent)]" />
+              <span>任务中心</span>
+              {activeTaskCount > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono font-semibold bg-[var(--accent)] text-white animate-pulse">
+                  {activeTaskCount}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
               onClick={() => setCanvasMode('image')}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--border-primary)] bg-[var(--bg-elevated)]/90 hover:bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] shadow-sm backdrop-blur transition-all active:scale-95"
               title="打开可生成无限画布"
@@ -307,6 +337,10 @@ function EpisodeWorkspace() {
             </button>
           </div>
         )}
+        <TaskCenterDrawer
+          isOpen={showTaskCenter}
+          onClose={() => setShowTaskCenter(false)}
+        />
         {canvasMode && (
           <InfiniteCanvas
             project={currentEpisode}

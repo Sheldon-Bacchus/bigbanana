@@ -268,9 +268,9 @@ const normalizeUpstreamEnvelope = (response, payload) => {
   };
 };
 
-const callNewApi = async ({ endpoint, path, method = 'GET', body, jar, userId }) => {
+const callNewApi = async ({ endpoint, path, method = 'GET', body, jar, userId, signal, headers: customHeaders }) => {
   const headers = {
-    Accept: 'application/json',
+    Accept: customHeaders?.Accept || customHeaders?.accept || 'application/json, text/event-stream, */*',
   };
 
   if (body !== undefined) {
@@ -286,12 +286,110 @@ const callNewApi = async ({ endpoint, path, method = 'GET', body, jar, userId })
     headers['New-Api-User'] = String(userId);
   }
 
+  if (customHeaders) {
+    Object.assign(headers, customHeaders);
+  }
+
   return fetch(`${endpoint}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
     redirect: 'follow',
+    signal,
   });
+};
+
+/**
+ * 响应透传：
+ * - 上游 Content-Type 为 text/event-stream 时流式转发（flushHeaders + 逐块 pipe）
+ * - 每 15s 发送 ': ping\n\n' 心跳
+ * - 客户端断开连接时 abort 上游请求
+ * - 非流式 JSON 行为保持不变
+ * - 异常或完成时清理计时器与事件监听
+ */
+const streamOrJsonResponse = async (req, res, response, upstreamAbortController, onPayloadCallback) => {
+  const contentType = response.headers.get('content-type') || '';
+  const isEventStream = contentType.toLowerCase().includes('text/event-stream');
+
+  if (isEventStream) {
+    res.statusCode = response.status || 200;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    if (typeof res.flushHeaders === 'function') {
+      res.flushHeaders();
+    }
+
+    let pingTimer = null;
+    let isCleanedUp = false;
+
+    const cleanup = () => {
+      if (isCleanedUp) return;
+      isCleanedUp = true;
+      if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = null;
+      }
+      res.removeListener('close', onClientClose);
+    };
+
+    const onClientClose = () => {
+      cleanup();
+      if (upstreamAbortController && !upstreamAbortController.signal.aborted) {
+        upstreamAbortController.abort();
+      }
+    };
+
+    res.on('close', onClientClose);
+
+    // 每 15 秒发送一次 SSE 心跳保活
+    pingTimer = setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(': ping\n\n');
+      }
+    }, 15000);
+
+    try {
+      if (response.body) {
+        const stream = Readable.fromWeb(response.body);
+        stream.on('data', (chunk) => {
+          if (!res.writableEnded && !res.destroyed) {
+            res.write(chunk);
+          }
+        });
+        stream.on('end', () => {
+          cleanup();
+          if (!res.writableEnded) {
+            res.end();
+          }
+        });
+        stream.on('error', () => {
+          cleanup();
+          if (!res.writableEnded) {
+            res.end();
+          }
+        });
+      } else {
+        cleanup();
+        res.end();
+      }
+    } catch {
+      cleanup();
+      if (!res.writableEnded) {
+        res.end();
+      }
+    }
+    return;
+  }
+
+  // 非流式 JSON 行为保持不变
+  const payload = normalizeUpstreamEnvelope(response, await parseUpstreamJson(response));
+  if (typeof onPayloadCallback === 'function') {
+    onPayloadCallback(payload);
+  }
+  json(res, response.status || 200, payload);
 };
 
 const proxyStatus = async (req, res, endpoint) => {
@@ -455,26 +553,53 @@ const proxyAuthed = async (req, res, upstreamPath, options = {}) => {
   if (!local) return;
 
   const { session } = local;
-  const response = await callNewApi({
-    endpoint: session.endpoint,
-    path: upstreamPath,
-    method: options.method || req.method || 'GET',
-    body: options.body,
-    jar: session.upstreamJar,
-    userId: session.user.id,
-  });
+  const upstreamAbortController = new AbortController();
 
-  mergeSetCookieIntoJar(session.upstreamJar, response);
-  updateLocalSession(local.sessionId, { upstreamJar: session.upstreamJar });
+  const onClientClose = () => {
+    if (!upstreamAbortController.signal.aborted) {
+      upstreamAbortController.abort();
+    }
+  };
+  res.on('close', onClientClose);
 
-  const payload = normalizeUpstreamEnvelope(response, await parseUpstreamJson(response));
+  try {
+    const customHeaders = {};
+    if (req.headers.accept) {
+      customHeaders.Accept = req.headers.accept;
+    }
 
-  if (!payload.success && [401, 403].includes(response.status)) {
-    destroyLocalSession(local.sessionId);
-    clearSessionCookie(req, res);
+    const response = await callNewApi({
+      endpoint: session.endpoint,
+      path: upstreamPath,
+      method: options.method || req.method || 'GET',
+      body: options.body,
+      jar: session.upstreamJar,
+      userId: session.user.id,
+      signal: upstreamAbortController.signal,
+      headers: customHeaders,
+    });
+
+    mergeSetCookieIntoJar(session.upstreamJar, response);
+    updateLocalSession(local.sessionId, { upstreamJar: session.upstreamJar });
+
+    await streamOrJsonResponse(req, res, response, upstreamAbortController, (payload) => {
+      if (payload && !payload.success && [401, 403].includes(response.status)) {
+        destroyLocalSession(local.sessionId);
+        clearSessionCookie(req, res);
+      }
+    });
+  } catch (error) {
+    if (!res.headersSent) {
+      const isAbort = error?.name === 'AbortError' || upstreamAbortController.signal.aborted;
+      json(res, isAbort ? 499 : 502, {
+        success: false,
+        message: isAbort ? '客户端已断开连接' : (error instanceof Error ? error.message : '上游代理服务异常'),
+        data: null,
+      });
+    }
+  } finally {
+    res.removeListener('close', onClientClose);
   }
-
-  json(res, response.status || 200, payload);
 };
 
 
@@ -680,6 +805,61 @@ export const createNewApiProxyHandler = () => {
             end_timestamp: requestUrl.searchParams.get('end_timestamp'),
           })}`,
         );
+        return;
+      }
+
+      // 支持 /api/new-api/v1/* 通用大模型流式与非流式调用透传
+      if (pathname.startsWith('/api/new-api/v1/')) {
+        const subPath = pathname.replace(/^\/api\/new-api/, '');
+        const local = getLocalSession(req);
+        const targetEndpoint = endpoint || local?.session?.endpoint || 'https://api.antsk.cn';
+        const upstreamAbortController = new AbortController();
+
+        const onClientClose = () => {
+          if (!upstreamAbortController.signal.aborted) {
+            upstreamAbortController.abort();
+          }
+        };
+        res.on('close', onClientClose);
+
+        try {
+          const customHeaders = {};
+          if (req.headers.authorization) {
+            customHeaders.Authorization = req.headers.authorization;
+          }
+          if (req.headers.accept) {
+            customHeaders.Accept = req.headers.accept;
+          }
+
+          const upstreamBody = body && typeof body === 'object' ? { ...body } : undefined;
+          if (upstreamBody && 'endpoint' in upstreamBody) {
+            delete upstreamBody.endpoint;
+          }
+
+          const response = await callNewApi({
+            endpoint: targetEndpoint,
+            path: `${subPath}${requestUrl.search || ''}`,
+            method: req.method || 'GET',
+            body: ['POST', 'PUT', 'PATCH'].includes(String(req.method).toUpperCase()) ? upstreamBody : undefined,
+            jar: local?.session?.upstreamJar,
+            userId: local?.session?.user?.id,
+            signal: upstreamAbortController.signal,
+            headers: customHeaders,
+          });
+
+          await streamOrJsonResponse(req, res, response, upstreamAbortController);
+        } catch (error) {
+          if (!res.headersSent) {
+            const isAbort = error?.name === 'AbortError' || upstreamAbortController.signal.aborted;
+            json(res, isAbort ? 499 : 502, {
+              success: false,
+              message: isAbort ? '客户端已断开连接' : (error instanceof Error ? error.message : '上游代理服务异常'),
+              data: null,
+            });
+          }
+        } finally {
+          res.removeListener('close', onClientClose);
+        }
         return;
       }
 
