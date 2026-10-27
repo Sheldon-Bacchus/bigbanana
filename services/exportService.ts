@@ -620,3 +620,11 @@ export async function downloadSourceAssets(
     throw error;
   }
 }
+
+export {
+  exportEpisodeAsPortableZip,
+  importPortableZip,
+  type PortableArchiveExportResult,
+  type PortableArchiveImportResult,
+} from './portableArchiveService';
+

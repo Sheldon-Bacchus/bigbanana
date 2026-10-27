@@ -529,7 +529,7 @@ export const CommitDialog: React.FC<CommitDialogProps> = ({
               <button
                 type="button"
                 onClick={handleBatchCommit}
-                disabled={isSubmitting || Boolean(batchProgress?.completed)}
+                disabled={isSubmitting || Boolean(batchProgress && batchProgress.completed >= batchProgress.total)}
                 className="flex items-center gap-1.5 rounded-lg bg-[var(--accent)] hover:opacity-90 px-4 py-2 text-xs font-bold text-white shadow-md transition-all active:scale-95 disabled:opacity-50"
               >
                 {isSubmitting ? (
@@ -537,7 +537,7 @@ export const CommitDialog: React.FC<CommitDialogProps> = ({
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     批量写回进行中...
                   </>
-                ) : batchProgress?.completed === batchProgress?.total ? (
+                ) : batchProgress !== null && batchProgress.completed === batchProgress.total ? (
                   <>
                     <CheckCircle className="h-3.5 w-3.5" />
                     批量写回已完成

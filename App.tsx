@@ -24,6 +24,8 @@ import { ProjectProvider, useProjectContext } from './contexts/ProjectContext';
 import { checkCharacterSync, checkSceneSync, checkPropSync } from './services/characterSyncService';
 import AssetSyncBanner from './components/CharacterLibrary/AssetSyncBanner';
 import InfiniteCanvas from './components/InfiniteCanvas';
+import StorageHealthBanner from './components/StorageHealthBanner';
+import { setLocalEditing } from './services/storageBusService';
 import logoImg from './logo.png';
 import { MediaCanvasState } from './types';
 
@@ -155,6 +157,7 @@ function EpisodeWorkspace() {
   useEffect(() => {
     if (!currentEpisode) return;
     setSaveStatus('unsaved');
+    setLocalEditing(true);
     setShowSaveStatus(true);
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(async () => {
@@ -162,6 +165,7 @@ function EpisodeWorkspace() {
       try {
         await saveEpisode(currentEpisode);
         setSaveStatus('saved');
+        setLocalEditing(false);
       } catch (e) {
         console.error("Auto-save failed", e);
       }
@@ -450,7 +454,12 @@ function App() {
   }, []);
 
   if (isMobile) return <MobileWarning />;
-  return <AppRoutes />;
+  return (
+    <>
+      <StorageHealthBanner />
+      <AppRoutes />
+    </>
+  );
 }
 
 export default App;

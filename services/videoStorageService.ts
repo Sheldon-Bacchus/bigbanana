@@ -290,3 +290,38 @@ export const materializeProjectVideosForExport = async (project: ProjectState): 
     shots: updatedShots,
   };
 };
+
+// =============================================
+// OPFS 便携包归档与打包辅助函数 (T25)
+// =============================================
+
+/**
+ * Direct helper to read video Blob from an OPFS reference string.
+ * 直接从 OPFS 引用读取视频二进制 Blob。
+ */
+export const readOpfsVideoBlob = async (ref: string): Promise<Blob> => {
+  return readBlobFromOpfsRef(ref);
+};
+
+/**
+ * Direct helper to write a Blob into OPFS and return the opfs:// URI.
+ * 将视频 Blob 直接写入 OPFS 并返回其 opfs:// 引用。
+ */
+export const persistVideoBlobToOPFS = async (
+  blob: Blob,
+  options?: PersistVideoOptions
+): Promise<string> => {
+  if (!supportsOPFSVideoStorage()) {
+    throw new Error('OPFS is not supported in this environment.');
+  }
+  return blobToOpfsRef(blob, options);
+};
+
+/**
+ * Extract the underlying file name from an opfs://video/... reference.
+ * 从 opfs://video/... 引用中提取文件名。
+ */
+export const extractOpfsFileName = (ref: string): string => {
+  return opfsRefToFileName(ref);
+};
+

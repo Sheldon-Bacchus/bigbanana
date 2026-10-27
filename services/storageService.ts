@@ -19,6 +19,7 @@ import { materializeProjectVideosForExport, migrateProjectVideosToOPFS } from '.
 import { reconcileShotSceneIds } from './storyboardIdUtils';
 import { sanitizePromptTemplateOverrides } from './promptTemplateService';
 import { normalizeChatModelId } from './modelIdUtils';
+import { broadcastStorageChanged } from './storageBusService';
 
 export const DB_NAME = 'BigBananaDB';
 export const DB_VERSION = 4;
@@ -222,7 +223,10 @@ export const saveSeriesProject = async (sp: SeriesProject): Promise<void> => {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(SP_STORE, 'readwrite');
     tx.objectStore(SP_STORE).put({ ...sp, lastModified: Date.now() });
-    tx.oncomplete = () => resolve();
+    tx.oncomplete = () => {
+      broadcastStorageChanged('project', sp.id);
+      resolve();
+    };
     tx.onerror = () => reject(tx.error);
   });
 };
@@ -353,7 +357,10 @@ export const saveEpisode = async (ep: Episode): Promise<void> => {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(EP_STORE, 'readwrite');
     tx.objectStore(EP_STORE).put({ ...normalized, lastModified: Date.now() });
-    tx.oncomplete = () => resolve();
+    tx.oncomplete = () => {
+      broadcastStorageChanged('episode', normalized.id);
+      resolve();
+    };
     tx.onerror = () => reject(tx.error);
   });
 };
@@ -659,7 +666,10 @@ export const saveCanvasGraph = async (graph: CanvasGraphEntity): Promise<void> =
   return new Promise((resolve, reject) => {
     const tx = db.transaction(CANVAS_GRAPH_STORE, 'readwrite');
     tx.objectStore(CANVAS_GRAPH_STORE).put(normalized);
-    tx.oncomplete = () => resolve();
+    tx.oncomplete = () => {
+      broadcastStorageChanged('canvas', normalized.id);
+      resolve();
+    };
     tx.onerror = () => reject(tx.error);
   });
 };
