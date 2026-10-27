@@ -1,5 +1,6 @@
-import { SeriesProject, Series, Episode, Character } from '../types';
+import { SeriesProject, Series, Episode, Character, CanvasGraphEntity, MediaVersionEntity } from '../types';
 import { normalizeChatModelId } from './modelIdUtils';
+import { createTypedId } from './uuidUtils';
 
 const generateId = (prefix: string): string => {
   const rand = Math.random().toString(36).slice(2, 6);
@@ -229,4 +230,194 @@ export async function runEpisodeTitleFixMigration(db: IDBDatabase): Promise<void
   });
 
   console.log(`Episode title fix migration applied: ${updates.length} episode(s) updated.`);
+}
+
+export interface V4BaselineData {
+  canvasGraphs: CanvasGraphEntity[];
+  mediaVersions: MediaVersionEntity[];
+}
+
+/**
+ * 遍历 episodes 提取存量 imageCanvas/videoCanvas 与媒体基线版本
+ * 遵循 006 规格数据模型第 4.1 节与幂等策略
+ */
+export function generateV4BaselineFromEpisodes(
+  episodes: Episode[],
+  existingGraphs?: CanvasGraphEntity[],
+  existingVersions?: MediaVersionEntity[]
+): V4BaselineData {
+  const existingGraphKeySet = new Set<string>();
+  (existingGraphs || []).forEach(g => {
+    existingGraphKeySet.add(`${g.episodeId}:::${g.mode}`);
+  });
+
+  const existingVersionTargetSet = new Set<string>();
+  (existingVersions || []).forEach(v => {
+    existingVersionTargetSet.add(`${v.targetType}:::${v.targetId}`);
+  });
+
+  const generatedGraphs: CanvasGraphEntity[] = [];
+  const generatedVersions: MediaVersionEntity[] = [];
+  const now = Date.now();
+
+  for (const ep of episodes) {
+    if (!ep || !ep.id) continue;
+
+    // 1. 处理存量 imageCanvas -> CanvasGraphEntity
+    if (ep.imageCanvas) {
+      const key = `${ep.id}:::image`;
+      if (!existingGraphKeySet.has(key)) {
+        existingGraphKeySet.add(key);
+        generatedGraphs.push({
+          id: createTypedId('cgraph'),
+          episodeId: ep.id,
+          mode: 'image',
+          viewport: ep.imageCanvas.viewport ? { ...ep.imageCanvas.viewport } : { x: 0, y: 0, zoom: 1 },
+          nodes: [],
+          edges: [],
+          updatedAt: ep.imageCanvas.updatedAt || now,
+          legacyNodePositions: ep.imageCanvas.nodePositions ? { ...ep.imageCanvas.nodePositions } : {},
+        });
+      }
+    }
+
+    // 2. 处理存量 videoCanvas -> CanvasGraphEntity
+    if (ep.videoCanvas) {
+      const key = `${ep.id}:::video`;
+      if (!existingGraphKeySet.has(key)) {
+        existingGraphKeySet.add(key);
+        generatedGraphs.push({
+          id: createTypedId('cgraph'),
+          episodeId: ep.id,
+          mode: 'video',
+          viewport: ep.videoCanvas.viewport ? { ...ep.videoCanvas.viewport } : { x: 0, y: 0, zoom: 1 },
+          nodes: [],
+          edges: [],
+          updatedAt: ep.videoCanvas.updatedAt || now,
+          legacyNodePositions: ep.videoCanvas.nodePositions ? { ...ep.videoCanvas.nodePositions } : {},
+        });
+      }
+    }
+
+    // 3. 处理存量媒体版本基线
+    if (Array.isArray(ep.shots)) {
+      for (const shot of ep.shots) {
+        if (!shot) continue;
+
+        // 3.1 关键帧: keyframes 有 imageUrl -> targetType 'keyframe'、targetId=keyframe.id
+        if (Array.isArray(shot.keyframes)) {
+          for (const kf of shot.keyframes) {
+            if (kf && kf.id && kf.imageUrl) {
+              const vKey = `keyframe:::${kf.id}`;
+              if (!existingVersionTargetSet.has(vKey)) {
+                existingVersionTargetSet.add(vKey);
+                generatedVersions.push({
+                  id: createTypedId('mver'),
+                  targetType: 'keyframe',
+                  targetId: kf.id,
+                  versionNumber: 1,
+                  mediaType: 'image',
+                  storageRef: kf.imageUrl,
+                  provenance: {
+                    source: 'workbench_manual',
+                    promptSnapshot: kf.visualPrompt,
+                  },
+                  isCurrent: true,
+                  createdAt: now,
+                });
+              }
+            }
+          }
+        }
+
+        // 3.2 视频片段: interval.videoUrl -> targetType 'interval'、targetId=shot.id
+        if (shot.interval && shot.interval.videoUrl) {
+          const vKey = `interval:::${shot.id}`;
+          if (!existingVersionTargetSet.has(vKey)) {
+            existingVersionTargetSet.add(vKey);
+            generatedVersions.push({
+              id: createTypedId('mver'),
+              targetType: 'interval',
+              targetId: shot.id,
+              versionNumber: 1,
+              mediaType: 'video',
+              storageRef: shot.interval.videoUrl,
+              provenance: {
+                source: 'workbench_manual',
+                promptSnapshot: shot.interval.videoPrompt,
+              },
+              isCurrent: true,
+              createdAt: now,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    canvasGraphs: generatedGraphs,
+    mediaVersions: generatedVersions,
+  };
+}
+
+/**
+ * BigBananaDB v3 -> v4 迁移执行函数
+ * 平滑迁移存量 imageCanvas/videoCanvas 到 canvas_graphs，并初始化 MediaVersion 基线
+ */
+export async function runV3ToV4Migration(db: IDBDatabase): Promise<void> {
+  try {
+    if (!db.objectStoreNames.contains('canvas_graphs')) return;
+    if (!db.objectStoreNames.contains('episodes') || !db.objectStoreNames.contains('media_versions')) return;
+
+    const episodes = await new Promise<Episode[]>((resolve, reject) => {
+      const tx = db.transaction('episodes', 'readonly');
+      const req = tx.objectStore('episodes').getAll();
+      req.onsuccess = () => resolve((req.result || []) as Episode[]);
+      req.onerror = () => reject(req.error);
+    });
+
+    if (episodes.length === 0) return;
+
+    const existingGraphs = await new Promise<CanvasGraphEntity[]>((resolve, reject) => {
+      const tx = db.transaction('canvas_graphs', 'readonly');
+      const req = tx.objectStore('canvas_graphs').getAll();
+      req.onsuccess = () => resolve((req.result || []) as CanvasGraphEntity[]);
+      req.onerror = () => reject(req.error);
+    });
+
+    const existingVersions = await new Promise<MediaVersionEntity[]>((resolve, reject) => {
+      const tx = db.transaction('media_versions', 'readonly');
+      const req = tx.objectStore('media_versions').getAll();
+      req.onsuccess = () => resolve((req.result || []) as MediaVersionEntity[]);
+      req.onerror = () => reject(req.error);
+    });
+
+    const { canvasGraphs, mediaVersions } = generateV4BaselineFromEpisodes(
+      episodes,
+      existingGraphs,
+      existingVersions
+    );
+
+    if (canvasGraphs.length === 0 && mediaVersions.length === 0) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(['canvas_graphs', 'media_versions'], 'readwrite');
+      const graphStore = tx.objectStore('canvas_graphs');
+      const mediaStore = tx.objectStore('media_versions');
+
+      canvasGraphs.forEach(g => graphStore.put(g));
+      mediaVersions.forEach(v => mediaStore.put(v));
+
+      tx.oncomplete = () => {
+        console.log(`v3 to v4 migration complete: ${canvasGraphs.length} canvas graph(s) and ${mediaVersions.length} media version(s) migrated.`);
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) {
+    console.warn('v3 to v4 migration warning (non-fatal):', e);
+  }
 }

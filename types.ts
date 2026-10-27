@@ -450,8 +450,8 @@ export interface MediaCanvasNodePosition {
 }
 
 export interface MediaCanvasState {
-  version: 1;
-  mode: 'inspect-only';
+  version: 1 | 2;
+  mode: 'inspect-only' | 'interactive';
   viewport: MediaCanvasViewport;
   nodePositions: Record<string, MediaCanvasNodePosition>;
   updatedAt: number;
@@ -485,6 +485,121 @@ export interface Episode {
 }
 
 export type ProjectState = Episode;
+
+// ============================================
+// Canvas & v4 Schema 实体定义 (006 规格)
+// ============================================
+
+export type CanvasNodeType = 
+  | 'shot_projection' // 导演台镜头投影节点 (携带 sourceRef)
+  | 'config_node'     // 独立提示词/参数/LoRA 配置卡片
+  | 'reference_slot'  // 角色/场景资产参考图槽位
+  | 'generation_task' // 正在排队/生成的执行节点
+  | 'artifact_output';// 生成完毕的产物卡片
+
+export interface CanvasNodeEntity {
+  id: string; // 稳定 UUID: cnode-<uuid>
+  graphId: string;
+  type: CanvasNodeType;
+  position: { x: number; y: number };
+  size?: { width: number; height: number };
+  data: Record<string, unknown>; // 节点自定义参数 (Prompt, 采样参数等)
+  sourceRef?: { // 溯源指针 (投影节点专用)
+    episodeId: string;
+    intervalId?: string;
+    shotId?: string;
+    keyframeId?: string;
+  };
+}
+
+export interface CanvasEdgeEntity {
+  id: string; // edge-<uuid>
+  sourceNodeId: string;
+  sourceHandle: string; // 出口插槽 (如 output-image)
+  targetNodeId: string;
+  targetHandle: string; // 入口插槽 (如 slot-1, slot-2)
+}
+
+export interface CanvasGraphEntity {
+  id: string; // 稳定 UUID: cgraph-<uuid> 或 graph-<uuid>
+  episodeId: string; // 关联分集 ID (ep_*)
+  mode: 'image' | 'video';
+  viewport: { x: number; y: number; zoom: number };
+  nodes: CanvasNodeEntity[];
+  edges: CanvasEdgeEntity[];
+  updatedAt: number;
+  legacyNodePositions?: Record<string, { x: number; y: number }>;
+}
+
+export interface GenerationTaskEntity {
+  id: string; // task-<uuid>
+  graphId: string;
+  nodeId: string;
+  taskType: 'text-to-image' | 'image-to-video' | 'fl2v';
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
+  progress: number; // 0 - 100
+  promptPayload: {
+    prompt: string;
+    negativePrompt?: string;
+    model: string;
+    referenceUrls: string[];
+    params: Record<string, unknown>;
+  };
+  remoteTaskId?: string; // 上游代理任务 ID
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ArtifactEntity {
+  id: string; // art-<uuid>
+  taskId: string;
+  mediaType: 'image' | 'video';
+  storageRef: string; // 本地 OPFS 协议 (opfs://video/*) 或 Base64 Data URL
+  thumbnailUrl?: string;
+  metadata: {
+    width: number;
+    height: number;
+    duration?: number;
+    fileSize: number;
+    sha256?: string;
+  };
+  createdAt: number;
+}
+
+export interface MediaVersionEntity {
+  id: string; // mver-<uuid>
+  targetType: 'keyframe' | 'interval' | 'character' | 'scene' | 'prop';
+  targetId: string; // 目标槽位业务 ID (如 kf-1-start, shot-1)
+  versionNumber: number; // 1, 2, 3... 递增
+  mediaType: 'image' | 'video';
+  storageRef: string; // 对应的 OPFS 视频路径或图片 Blob URI
+  provenance: {
+    source: 'canvas_commit' | 'workbench_manual' | 'import';
+    canvasNodeId?: string;
+    taskId?: string;
+    promptSnapshot?: string;
+    modelSnapshot?: string;
+  };
+  isCurrent: boolean; // 当前活跃版本
+  createdAt: number;
+}
+
+export interface CommitRecordEntity {
+  id: string; // cmt-<uuid>
+  sourceNodeId: string;
+  targetId: string;
+  targetType: string;
+  committedVersionId: string;
+  previousVersionId?: string;
+  diffSummary: {
+    promptChanged: boolean;
+    mediaReplaced: boolean;
+  };
+  status: 'applied' | 'reverted';
+  timestamp: number;
+}
+
 
 // ============================================
 // 模型管理相关类型定义

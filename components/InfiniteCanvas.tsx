@@ -1,20 +1,36 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertCircle } from 'lucide-react';
 import {
-  ArrowRight,
-  Focus,
-  Image as ImageIcon,
-  Maximize2,
-  Minus,
-  Move,
-  Plus,
-  Video as VideoIcon,
-  X,
-} from 'lucide-react';
-import { MediaCanvasState, MediaCanvasViewport, ProjectState } from '../types';
-
-type CanvasMode = 'image' | 'video';
-type CanvasEntryMode = CanvasMode | 'all';
-type CanvasNodeKind = 'reference' | 'shot' | 'image' | 'video';
+  CanvasEdgeEntity,
+  CanvasGraphEntity,
+  CanvasNodeEntity,
+  MediaCanvasState,
+  MediaCanvasViewport,
+  ProjectState,
+} from '../types';
+import { getCanvasGraph, saveCanvasGraph } from '../services/storageService';
+import {
+  CanvasEntryMode,
+  CanvasMode,
+  ConnectingState,
+  DEFAULT_VIEWPORT,
+  DragState,
+  NODE_HEIGHT,
+  NODE_WIDTH,
+  WORLD_HEIGHT,
+  WORLD_WIDTH,
+  clamp,
+} from './canvas/canvasConstants';
+import {
+  buildInitialCanvasGraph,
+  calculateHandlePosition,
+  generateStableId,
+  mergeGraphWithProject,
+  validateNewEdge,
+} from './canvas/canvasGraphUtils';
+import { CanvasNodeCard } from './canvas/CanvasNodeCard';
+import { CanvasEdgeLayer } from './canvas/CanvasEdgeLayer';
+import { CanvasToolbar } from './canvas/CanvasToolbar';
 
 interface InfiniteCanvasProps {
   project: ProjectState;
@@ -24,274 +40,6 @@ interface InfiniteCanvasProps {
   onChange: (mode: CanvasMode, state: MediaCanvasState) => void;
 }
 
-interface CanvasNodeModel {
-  id: string;
-  kind: CanvasNodeKind;
-  title: string;
-  subtitle: string;
-  status: string;
-  imageUrl?: string;
-  videoUrl?: string;
-  shotId?: string;
-  x: number;
-  y: number;
-}
-
-interface CanvasEdge {
-  from: string;
-  to: string;
-}
-
-interface DragState {
-  type: 'canvas' | 'node';
-  nodeId?: string;
-  startX: number;
-  startY: number;
-  startViewport?: MediaCanvasViewport;
-  startNode?: { x: number; y: number };
-}
-
-const NODE_WIDTH = 238;
-const NODE_HEIGHT = 176;
-const REFERENCE_NODE_HEIGHT = 238;
-const WORLD_WIDTH = 1500;
-const WORLD_HEIGHT = 980;
-const DEFAULT_VIEWPORT: MediaCanvasViewport = { x: 28, y: 24, zoom: 0.76 };
-
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-
-const getStartFrame = (shot: ProjectState['shots'][number]) =>
-  shot.keyframes?.find((keyframe) => keyframe.type === 'start');
-
-const getImageStatus = (shot: ProjectState['shots'][number]) => {
-  const frame = getStartFrame(shot);
-  if (frame?.imageUrl) return '已生成';
-  if (frame?.status === 'generating') return '生成中';
-  if (frame?.status === 'failed') return '生成失败';
-  return '待生成';
-};
-
-const getVideoStatus = (shot: ProjectState['shots'][number]) => {
-  if (shot.interval?.videoUrl) return '已生成';
-  if (shot.interval?.status === 'generating') return '生成中';
-  if (shot.interval?.status === 'failed') return '生成失败';
-  return '待生成';
-};
-
-const resolvePosition = (
-  state: MediaCanvasState | undefined,
-  id: string,
-  fallback: { x: number; y: number }
-) => state?.nodePositions?.[id] || fallback;
-
-const getReferenceImage = (project: ProjectState): string | undefined => {
-  const candidates = [
-    ...(project.scriptData?.characters || []).map((character) => character.referenceImage),
-    ...(project.scriptData?.scenes || []).map((scene) => scene.referenceImage),
-    ...(project.scriptData?.props || []).map((prop) => prop.referenceImage),
-  ];
-  return candidates.find((image): image is string => Boolean(image));
-};
-
-const buildCanvasGraph = (
-  project: ProjectState,
-  mode: CanvasMode,
-  state: MediaCanvasState | undefined
-): { nodes: CanvasNodeModel[]; edges: CanvasEdge[] } => {
-  const nodes: CanvasNodeModel[] = [];
-  const edges: CanvasEdge[] = [];
-  const shots = project.shots || [];
-  const referenceCount =
-    (project.scriptData?.characters?.length || 0) +
-    (project.scriptData?.scenes?.length || 0) +
-    (project.scriptData?.props?.length || 0);
-
-  const referenceId = `reference-bundle-${mode}`;
-  nodes.push({
-    id: referenceId,
-    kind: 'reference',
-    title: mode === 'image' ? '图像参考资产' : '视频输入参考',
-    subtitle: `${referenceCount} 项角色 / 场景 / 道具绑定`,
-    status: '只读上下文',
-    imageUrl: getReferenceImage(project),
-    ...resolvePosition(state, referenceId, { x: 34, y: 42 }),
-  });
-
-  shots.forEach((shot, index) => {
-    const row = index % 3;
-    const columnOffset = Math.floor(index / 3) * 34;
-    const y = 42 + row * 260;
-    const shotId = `shot-${shot.id}`;
-    const imageId = `image-${shot.id}`;
-    const videoId = `video-${shot.id}`;
-    const startFrame = getStartFrame(shot);
-    const shotPosition = resolvePosition(state, shotId, { x: 320 + columnOffset, y });
-
-    nodes.push({
-      id: shotId,
-      kind: 'shot',
-      title: `SHOT ${String(index + 1).padStart(3, '0')}`,
-      subtitle: shot.cameraMovement || '未设置运镜',
-      status: shot.actionSummary ? '镜头提示词已绑定' : '缺少动作描述',
-      shotId: shot.id,
-      ...shotPosition,
-    });
-    edges.push({ from: referenceId, to: shotId });
-
-    const imagePosition = resolvePosition(state, imageId, { x: 610 + columnOffset, y });
-    nodes.push({
-      id: imageId,
-      kind: 'image',
-      title: '生图 / 关键帧',
-      subtitle: startFrame?.visualPrompt || '提示词会从镜头动作与资产上下文生成',
-      status: getImageStatus(shot),
-      imageUrl: startFrame?.imageUrl,
-      shotId: shot.id,
-      ...imagePosition,
-    });
-    edges.push({ from: shotId, to: imageId });
-
-    if (mode === 'video') {
-      const videoPosition = resolvePosition(state, videoId, { x: 900 + columnOffset, y });
-      nodes.push({
-        id: videoId,
-        kind: 'video',
-        title: '生视频',
-        subtitle: shot.interval?.videoPrompt || '视频运动提示词待确认',
-        status: getVideoStatus(shot),
-        videoUrl: shot.interval?.videoUrl,
-        shotId: shot.id,
-        ...videoPosition,
-      });
-      edges.push({ from: imageId, to: videoId });
-    }
-  });
-
-  return { nodes, edges };
-};
-
-const statusClass = (status: string) => {
-  if (status === '已生成' || status === '镜头提示词已绑定') {
-    return 'text-[var(--success-text)] border-[var(--success-border)] bg-[var(--success-bg)]';
-  }
-  if (status === '生成中') {
-    return 'text-[var(--warning-text)] border-[var(--warning-border)] bg-[var(--warning-bg)]';
-  }
-  if (status === '生成失败' || status === '缺少动作描述') {
-    return 'text-[var(--error-text)] border-[var(--error-border)] bg-[var(--error-hover-bg)]';
-  }
-  return 'text-[var(--text-muted)] border-[var(--border-primary)] bg-[var(--bg-hover)]';
-};
-
-const nodeAccentClass: Record<CanvasNodeKind, string> = {
-  reference: 'border-amber-400/50 bg-amber-400/[0.06]',
-  shot: 'border-[var(--border-secondary)] bg-[var(--bg-surface)]',
-  image: 'border-violet-400/50 bg-violet-400/[0.06]',
-  video: 'border-emerald-400/50 bg-emerald-400/[0.06]',
-};
-
-const nodeIcon = (kind: CanvasNodeKind) => {
-  if (kind === 'image') return <ImageIcon className="h-3.5 w-3.5" />;
-  if (kind === 'video') return <VideoIcon className="h-3.5 w-3.5" />;
-  if (kind === 'reference') return <Focus className="h-3.5 w-3.5" />;
-  return <Move className="h-3.5 w-3.5" />;
-};
-
-const CanvasNodeCard: React.FC<{
-  node: CanvasNodeModel;
-  selected: boolean;
-  onSelect: () => void;
-  onOpenShot?: (shotId: string) => void;
-  onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => void;
-}> = ({ node, selected, onSelect, onOpenShot, onPointerDown }) => (
-  <div
-    data-canvas-node="true"
-    className={`absolute w-[238px] overflow-hidden rounded-xl border shadow-xl backdrop-blur-sm transition-shadow ${nodeAccentClass[node.kind]} ${selected ? 'ring-2 ring-[var(--accent)] shadow-[var(--accent-shadow)]' : ''}`}
-    style={{ left: node.x, top: node.y, height: node.kind === 'reference' ? REFERENCE_NODE_HEIGHT : NODE_HEIGHT }}
-    onPointerDown={onPointerDown}
-    onClick={(event) => {
-      event.stopPropagation();
-      onSelect();
-    }}
-  >
-    <div className="flex h-10 items-center gap-2 border-b border-[var(--border-primary)] bg-[var(--bg-elevated)]/85 px-3">
-      <span className="text-[var(--accent-text)]">{nodeIcon(node.kind)}</span>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-[10px] font-bold uppercase tracking-widest text-[var(--text-primary)]">{node.title}</p>
-        <p className="truncate text-[9px] font-mono text-[var(--text-muted)]">{node.subtitle}</p>
-      </div>
-      <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[8px] font-mono ${statusClass(node.status)}`}>{node.status}</span>
-    </div>
-
-    <div className="p-3">
-      {node.kind === 'reference' && (
-        <div className="space-y-2">
-          <div className="grid grid-cols-4 gap-1">
-            {Array.from({ length: 4 }).map((_, index) => (
-              <div key={index} className="aspect-square overflow-hidden rounded border border-[var(--border-primary)] bg-[var(--bg-base)]">
-                {index === 0 && node.imageUrl ? (
-                  <img src={node.imageUrl} alt="参考资产" className="h-full w-full object-cover" />
-                ) : (
-                  <div className="flex h-full items-center justify-center text-[9px] text-[var(--text-muted)]">REF</div>
-                )}
-              </div>
-            ))}
-          </div>
-          <p className="text-[10px] leading-relaxed text-[var(--text-tertiary)]">
-            角色、场景、道具和视觉风格在这里作为生成上下文展示；不在画布内上传或替换模型。
-          </p>
-        </div>
-      )}
-
-      {node.kind === 'shot' && (
-        <div className="space-y-2">
-          <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)] p-2 text-[10px] leading-relaxed text-[var(--text-secondary)]">
-            {node.subtitle === '未设置运镜' ? '镜头动作摘要会在这里作为下游生图/生视频的共同输入。' : '动作、台词、资产绑定和镜头运动已汇入此节点。'}
-          </div>
-          {node.shotId && onOpenShot && (
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenShot(node.shotId!);
-              }}
-              className="inline-flex items-center gap-1 rounded border border-[var(--accent-border)] bg-[var(--accent-bg)] px-2 py-1 text-[9px] font-bold text-[var(--accent-text)] hover:bg-[var(--accent-bg-strong)]"
-            >
-              打开镜头工作台 <ArrowRight className="h-3 w-3" />
-            </button>
-          )}
-        </div>
-      )}
-
-      {node.kind === 'image' && (
-        <div className="aspect-[16/9] overflow-hidden rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)]">
-          {node.imageUrl ? (
-            <img src={node.imageUrl} alt={node.title} className="h-full w-full object-cover" />
-          ) : (
-            <div className="flex h-full flex-col items-center justify-center gap-1 text-[10px] text-[var(--text-muted)]">
-              <ImageIcon className="h-5 w-5 opacity-60" />
-              <span>PREVIEW AREA</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {node.kind === 'video' && (
-        <div className="aspect-[16/9] overflow-hidden rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)]">
-          {node.videoUrl ? (
-            <video src={node.videoUrl} controls muted className="h-full w-full object-cover" />
-          ) : (
-            <div className="flex h-full flex-col items-center justify-center gap-1 text-[10px] text-[var(--text-muted)]">
-              <VideoIcon className="h-5 w-5 opacity-60" />
-              <span>VIDEO PREVIEW</span>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  </div>
-);
-
 const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
   project,
   initialMode = 'all',
@@ -299,82 +47,374 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
   onOpenShot,
   onChange,
 }) => {
-  const [activeMode, setActiveMode] = useState<CanvasMode>(initialMode === 'video' ? 'video' : 'image');
-  const activeState = activeMode === 'image' ? project.imageCanvas : project.videoCanvas;
-  const [viewport, setViewport] = useState<MediaCanvasViewport>(activeState?.viewport || DEFAULT_VIEWPORT);
-  const [nodePositions, setNodePositions] = useState(activeState?.nodePositions || {});
+  // 1. 画布主模态与数据实体（以 CanvasGraphEntity 为单一真源）
+  const [activeMode, setActiveMode] = useState<CanvasMode>(
+    initialMode === 'video' ? 'video' : 'image'
+  );
+  const [graph, setGraph] = useState<CanvasGraphEntity | null>(null);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('saved');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [notification, setNotification] = useState<string | null>(null);
+  const [connectingState, setConnectingState] = useState<ConnectingState | null>(null);
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isDirtyRef = useRef<boolean>(false);
+  const latestGraphRef = useRef<CanvasGraphEntity | null>(null);
 
-  const graph = useMemo(() => {
-    const state: MediaCanvasState = {
-      version: 1,
-      mode: 'inspect-only',
-      viewport,
-      nodePositions,
-      updatedAt: Date.now(),
-    };
-    return buildCanvasGraph(project, activeMode, state);
-  }, [project, activeMode, viewport, nodePositions]);
+  // 临时提示消息自动淡出
+  const showNotification = useCallback((message: string) => {
+    setNotification(message);
+    setTimeout(() => {
+      setNotification((current) => (current === message ? null : current));
+    }, 3000);
+  }, []);
 
-  const nodeMap = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
+  // 2. 存盘逻辑与 Flush 保证
+  const performSave = useCallback(async () => {
+    if (!isDirtyRef.current || !latestGraphRef.current) return;
+    try {
+      setSaveStatus('saving');
+      const toSave: CanvasGraphEntity = {
+        ...latestGraphRef.current,
+        updatedAt: Date.now(),
+      };
+      await saveCanvasGraph(toSave);
+      isDirtyRef.current = false;
+      setSaveStatus('saved');
+    } catch (err) {
+      console.warn('saveCanvasGraph failed:', err);
+      // 失败时保留本地状态
+      setSaveStatus('error');
+    }
+  }, []);
 
+  const flushSave = useCallback(async () => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    await performSave();
+  }, [performSave]);
+
+  // 3. 图状态变更封装（自动触发防抖 600ms 存盘与旧字段兼容回调）
+  const updateGraph = useCallback(
+    (updater: (prev: CanvasGraphEntity) => CanvasGraphEntity) => {
+      setGraph((prev) => {
+        if (!prev) return prev;
+        const next = updater(prev);
+        latestGraphRef.current = next;
+        isDirtyRef.current = true;
+
+        // 回传 App 兼容旧字段（标记模式为 interactive）
+        onChange(activeMode, {
+          version: 2,
+          mode: 'interactive',
+          viewport: next.viewport,
+          nodePositions: next.legacyNodePositions || {},
+          updatedAt: Date.now(),
+        });
+
+        // 防抖 600ms 存盘
+        if (saveTimerRef.current) {
+          clearTimeout(saveTimerRef.current);
+        }
+        setSaveStatus('saving');
+        saveTimerRef.current = setTimeout(() => {
+          performSave();
+        }, 600);
+
+        return next;
+      });
+    },
+    [activeMode, onChange, performSave]
+  );
+
+  // 4. 数据加载与生命周期：进入或切换模式/分集时拉取并初始化图
   useEffect(() => {
-    const nextState = activeMode === 'image' ? project.imageCanvas : project.videoCanvas;
-    setViewport(nextState?.viewport || DEFAULT_VIEWPORT);
-    setNodePositions(nextState?.nodePositions || {});
+    let isCancelled = false;
+
+    const loadGraph = async () => {
+      try {
+        const stored = await getCanvasGraph(project.id, activeMode);
+        if (isCancelled) return;
+
+        if (stored) {
+          const merged = mergeGraphWithProject(stored, project, activeMode);
+          setGraph(merged);
+          latestGraphRef.current = merged;
+          isDirtyRef.current = false;
+          setSaveStatus('saved');
+        } else {
+          // 无历史记录，使用推导初始图构建
+          const legacyState = activeMode === 'image' ? project.imageCanvas : project.videoCanvas;
+          const initial = buildInitialCanvasGraph(project, activeMode, legacyState);
+          setGraph(initial);
+          latestGraphRef.current = initial;
+          isDirtyRef.current = true;
+          // 初次构建直接存盘
+          saveCanvasGraph(initial).catch((err) => {
+            console.warn('Initial saveCanvasGraph failed:', err);
+          });
+          setSaveStatus('saved');
+        }
+      } catch (err) {
+        console.warn('Failed to load canvas graph from IndexedDB:', err);
+        const legacyState = activeMode === 'image' ? project.imageCanvas : project.videoCanvas;
+        const fallback = buildInitialCanvasGraph(project, activeMode, legacyState);
+        if (!isCancelled) {
+          setGraph(fallback);
+          latestGraphRef.current = fallback;
+        }
+      }
+    };
+
+    loadGraph();
+
+    return () => {
+      isCancelled = true;
+      flushSave();
+    };
+  }, [project.id, activeMode, flushSave]);
+
+  // 切换画布模式前先强刷存盘
+  const handleModeChange = async (nextMode: CanvasMode) => {
+    if (nextMode === activeMode) return;
+    await flushSave();
+    setActiveMode(nextMode);
     setSelectedNodeId(null);
-  }, [activeMode, project.id]);
-
-  useEffect(() => {
-    const state: MediaCanvasState = {
-      version: 1,
-      mode: 'inspect-only',
-      viewport,
-      nodePositions,
-      updatedAt: Date.now(),
-    };
-    onChange(activeMode, state);
-    // Persist only after the local canvas state changes. The parent already
-    // debounces the project save, so this remains cheap during a drag.
-  }, [activeMode, viewport, nodePositions]);
-
-  const updateViewport = (next: MediaCanvasViewport) => {
-    setViewport({
-      x: next.x,
-      y: next.y,
-      zoom: clamp(next.zoom, 0.45, 1.35),
-    });
+    setSelectedEdgeId(null);
   };
 
+  // 关闭前先强刷存盘
+  const handleClose = async () => {
+    await flushSave();
+    onClose();
+  };
+
+  // 视口操作
+  const updateViewport = (next: MediaCanvasViewport) => {
+    updateGraph((prev) => ({
+      ...prev,
+      viewport: {
+        x: next.x,
+        y: next.y,
+        zoom: clamp(next.zoom, 0.35, 1.6),
+      },
+    }));
+  };
+
+  // 获取当前可见视口中心点在世界坐标系中的对应位置
+  const getViewportCenter = useCallback(() => {
+    const container = containerRef.current;
+    const currentViewport = graph?.viewport || DEFAULT_VIEWPORT;
+    const width = container?.clientWidth || 1000;
+    const height = container?.clientHeight || 700;
+    return {
+      x: (width / 2 - currentViewport.x) / currentViewport.zoom,
+      y: (height / 2 - currentViewport.y) / currentViewport.zoom,
+    };
+  }, [graph?.viewport]);
+
+  // 工具栏功能：+ 配置节点
+  const handleAddConfigNode = () => {
+    if (!graph) return;
+    const center = getViewportCenter();
+    const nodeId = generateStableId('cnode-cfg');
+    const newNode: CanvasNodeEntity = {
+      id: nodeId,
+      graphId: graph.id,
+      type: 'config_node',
+      position: {
+        x: Math.max(20, Math.round(center.x - NODE_WIDTH / 2)),
+        y: Math.max(20, Math.round(center.y - NODE_HEIGHT / 2)),
+      },
+      data: {
+        title: '配置节点',
+        subtitle: '提示词 / 风格参数',
+        prompt: '',
+        status: '就绪',
+      },
+    };
+    updateGraph((prev) => ({
+      ...prev,
+      nodes: [...prev.nodes, newNode],
+      legacyNodePositions: {
+        ...(prev.legacyNodePositions || {}),
+        [nodeId]: newNode.position,
+      },
+    }));
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeId(null);
+  };
+
+  // 工具栏功能：+ 参考槽位
+  const handleAddReferenceSlot = () => {
+    if (!graph) return;
+    const center = getViewportCenter();
+    const existingSlots = graph.nodes.filter((n) => n.type === 'reference_slot');
+    const slotNumber = existingSlots.length + 1;
+    const nodeId = generateStableId('cnode-ref');
+    const newNode: CanvasNodeEntity = {
+      id: nodeId,
+      graphId: graph.id,
+      type: 'reference_slot',
+      position: {
+        x: Math.max(20, Math.round(center.x - NODE_WIDTH / 2)),
+        y: Math.max(20, Math.round(center.y - NODE_HEIGHT / 2)),
+      },
+      data: {
+        title: `参考槽位 #${slotNumber}`,
+        subtitle: '单资产参考图',
+        slotNumber,
+        imageUrl: '',
+        status: '待绑定',
+      },
+    };
+    updateGraph((prev) => ({
+      ...prev,
+      nodes: [...prev.nodes, newNode],
+      legacyNodePositions: {
+        ...(prev.legacyNodePositions || {}),
+        [nodeId]: newNode.position,
+      },
+    }));
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeId(null);
+  };
+
+  // 删除选中项（支持选中节点或连线）
+  const handleDeleteSelected = useCallback(() => {
+    if (selectedEdgeId) {
+      updateGraph((prev) => ({
+        ...prev,
+        edges: prev.edges.filter((e) => e.id !== selectedEdgeId),
+      }));
+      setSelectedEdgeId(null);
+      return;
+    }
+    if (selectedNodeId) {
+      updateGraph((prev) => {
+        const remainingNodes = prev.nodes.filter((n) => n.id !== selectedNodeId);
+        const remainingEdges = prev.edges.filter(
+          (e) => e.sourceNodeId !== selectedNodeId && e.targetNodeId !== selectedNodeId
+        );
+        const remainingPositions = { ...(prev.legacyNodePositions || {}) };
+        delete remainingPositions[selectedNodeId];
+        return {
+          ...prev,
+          nodes: remainingNodes,
+          edges: remainingEdges,
+          legacyNodePositions: remainingPositions,
+        };
+      });
+      setSelectedNodeId(null);
+    }
+  }, [selectedEdgeId, selectedNodeId, updateGraph]);
+
+  // 全局键盘监听：Delete / Backspace 键删除选中节点或连线
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        const target = event.target as HTMLElement;
+        if (
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable
+        ) {
+          return;
+        }
+        if (selectedNodeId || selectedEdgeId) {
+          event.preventDefault();
+          handleDeleteSelected();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedNodeId, selectedEdgeId, handleDeleteSelected]);
+
+  // 画布平移交互
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
-    if (target.closest('[data-canvas-node="true"]')) return;
+    if (
+      target.closest('[data-canvas-node="true"]') ||
+      target.closest('[data-handle-id]') ||
+      target.closest('button')
+    ) {
+      return;
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
     dragRef.current = {
       type: 'canvas',
       startX: event.clientX,
       startY: event.clientY,
-      startViewport: viewport,
+      startViewport: graph?.viewport || DEFAULT_VIEWPORT,
     };
   };
 
-  const handleNodePointerDown = (node: CanvasNodeModel, event: React.PointerEvent<HTMLDivElement>) => {
+  // 节点拖拽交互
+  const handleNodePointerDown = (
+    node: CanvasNodeEntity,
+    event: React.PointerEvent<HTMLDivElement>
+  ) => {
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     setSelectedNodeId(node.id);
+    setSelectedEdgeId(null);
     dragRef.current = {
       type: 'node',
       nodeId: node.id,
       startX: event.clientX,
       startY: event.clientY,
-      startNode: { x: node.x, y: node.y },
+      startNode: { x: node.position.x, y: node.position.y },
     };
   };
 
+  // 插槽连线交互启动
+  const handleStartConnecting = (
+    nodeId: string,
+    handleId: string,
+    event: React.PointerEvent<HTMLDivElement>
+  ) => {
+    event.stopPropagation();
+    if (!graph || !containerRef.current) return;
+    const sourceNode = graph.nodes.find((n) => n.id === nodeId);
+    if (!sourceNode) return;
+
+    const handlePos = calculateHandlePosition(sourceNode, handleId, 'output');
+    setConnectingState({
+      sourceNodeId: nodeId,
+      sourceHandle: handleId,
+      startX: handlePos.x,
+      startY: handlePos.y,
+      currentX: handlePos.x,
+      currentY: handlePos.y,
+    });
+  };
+
+  // 全局移动响应（平移 / 拖动节点 / 连线实时更新）
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const currentViewport = graph?.viewport || DEFAULT_VIEWPORT;
+
+    // 1. 若正在连线，实时计算鼠标在画布坐标系中的端点
+    if (connectingState && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      const worldX = (event.clientX - rect.left - currentViewport.x) / currentViewport.zoom;
+      const worldY = (event.clientY - rect.top - currentViewport.y) / currentViewport.zoom;
+      setConnectingState((prev) => (prev ? { ...prev, currentX: worldX, currentY: worldY } : null));
+      return;
+    }
+
     const drag = dragRef.current;
     if (!drag) return;
+
+    // 2. 画布平移
     if (drag.type === 'canvas' && drag.startViewport) {
       updateViewport({
         ...drag.startViewport,
@@ -383,179 +423,323 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
       });
       return;
     }
+
+    // 3. 节点拖拽移动（连线会根据节点坐标实时联动刷新）
     if (drag.type === 'node' && drag.nodeId && drag.startNode) {
-      setNodePositions((previous) => ({
-        ...previous,
-        [drag.nodeId!]: {
-          x: Math.max(8, drag.startNode!.x + (event.clientX - drag.startX) / viewport.zoom),
-          y: Math.max(8, drag.startNode!.y + (event.clientY - drag.startY) / viewport.zoom),
+      const nextX = Math.max(8, drag.startNode.x + (event.clientX - drag.startX) / currentViewport.zoom);
+      const nextY = Math.max(8, drag.startNode.y + (event.clientY - drag.startY) / currentViewport.zoom);
+
+      updateGraph((prev) => ({
+        ...prev,
+        nodes: prev.nodes.map((node) =>
+          node.id === drag.nodeId
+            ? { ...node, position: { x: nextX, y: nextY } }
+            : node
+        ),
+        legacyNodePositions: {
+          ...(prev.legacyNodePositions || {}),
+          [drag.nodeId!]: { x: nextX, y: nextY },
         },
       }));
     }
   };
 
+  // 释放鼠标事件
   const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     dragRef.current = null;
+
+    // 处理连线落点判定
+    if (connectingState && graph) {
+      const elem = document.elementFromPoint(event.clientX, event.clientY);
+      const handleElem = elem?.closest('[data-handle-type="input"]');
+      if (handleElem) {
+        const targetNodeId = handleElem.getAttribute('data-node-id');
+        const targetHandle = handleElem.getAttribute('data-handle-id');
+
+        if (targetNodeId && targetHandle) {
+          const validation = validateNewEdge(
+            graph.nodes,
+            graph.edges,
+            connectingState.sourceNodeId,
+            connectingState.sourceHandle,
+            targetNodeId,
+            targetHandle
+          );
+
+          if (validation.valid) {
+            const newEdge: CanvasEdgeEntity = {
+              id: generateStableId('edge'),
+              sourceNodeId: connectingState.sourceNodeId,
+              sourceHandle: connectingState.sourceHandle,
+              targetNodeId,
+              targetHandle,
+            };
+            updateGraph((prev) => ({
+              ...prev,
+              edges: [...prev.edges, newEdge],
+            }));
+            setSelectedEdgeId(newEdge.id);
+            setSelectedNodeId(null);
+          } else if (validation.error) {
+            showNotification(validation.error);
+          }
+        }
+      }
+      setConnectingState(null);
+    }
   };
 
+  // 滚轮缩放
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     event.preventDefault();
+    const currentViewport = graph?.viewport || DEFAULT_VIEWPORT;
     const direction = event.deltaY > 0 ? -0.05 : 0.05;
-    updateViewport({ ...viewport, zoom: viewport.zoom + direction });
+    updateViewport({ ...currentViewport, zoom: currentViewport.zoom + direction });
   };
 
+  const nodeMap = useMemo(
+    () => new Map((graph?.nodes || []).map((node) => [node.id, node])),
+    [graph?.nodes]
+  );
   const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) : undefined;
-  const generatedCount = graph.nodes.filter((node) => node.status === '已生成').length;
-  const outputCount = graph.nodes.filter((node) => node.kind === 'image' || node.kind === 'video').length;
+  const viewport = graph?.viewport || DEFAULT_VIEWPORT;
+
+  const generatedCount = (graph?.nodes || []).filter(
+    (node) => node.data?.status === '已生成' || node.data?.status === 'succeeded'
+  ).length;
+  const outputCount = (graph?.nodes || []).filter(
+    (node) => node.type === 'artifact_output'
+  ).length;
 
   return (
-    <div className="absolute inset-0 z-[60] flex min-w-0 flex-col bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
-      <div className="flex h-16 shrink-0 items-center justify-between border-b border-[var(--border-primary)] bg-[var(--bg-elevated)] px-6">
-        <div className="flex min-w-0 items-center gap-3">
-          <Maximize2 className="h-5 w-5 text-[var(--accent)]" />
-          <div className="min-w-0">
-            <h2 className="truncate text-lg font-bold text-[var(--text-primary)]">无限画布</h2>
-            <p className="font-mono text-[10px] uppercase tracking-widest text-[var(--text-muted)]">INFINITE CANVAS · INSPECT ONLY</p>
-          </div>
-          <span className="hidden rounded border border-[var(--warning-border)] bg-[var(--warning-bg)] px-2 py-1 text-[9px] font-mono text-[var(--warning-text)] lg:inline-flex">
-            不上模型 · 只做可视化编排
-          </span>
-        </div>
+    <div className="absolute inset-0 z-[60] flex min-w-0 flex-col bg-[var(--bg-secondary)] text-[var(--text-secondary)] select-none">
+      {/* 顶部工具栏 */}
+      <CanvasToolbar
+        activeMode={activeMode}
+        viewport={viewport}
+        saveStatus={saveStatus}
+        hasSelection={Boolean(selectedNodeId || selectedEdgeId)}
+        onModeChange={handleModeChange}
+        onAddConfigNode={handleAddConfigNode}
+        onAddReferenceSlot={handleAddReferenceSlot}
+        onDeleteSelected={handleDeleteSelected}
+        onZoomIn={() => updateViewport({ ...viewport, zoom: viewport.zoom + 0.1 })}
+        onZoomOut={() => updateViewport({ ...viewport, zoom: viewport.zoom - 0.1 })}
+        onResetViewport={() => {
+          updateViewport(DEFAULT_VIEWPORT);
+          setSelectedNodeId(null);
+          setSelectedEdgeId(null);
+        }}
+        onClose={handleClose}
+      />
 
-        <div className="flex items-center gap-2">
-          <div className="flex items-center rounded-lg border border-[var(--border-primary)] bg-[var(--bg-surface)] p-1">
-            <button
-              type="button"
-              onClick={() => setActiveMode('image')}
-              className={`inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider ${activeMode === 'image' ? 'bg-[var(--accent-bg)] text-[var(--accent-text)]' : 'text-[var(--text-tertiary)] hover:text-[var(--text-primary)]'}`}
-            >
-              <ImageIcon className="h-3.5 w-3.5" /> 生图画布
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveMode('video')}
-              className={`inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider ${activeMode === 'video' ? 'bg-[var(--accent-bg)] text-[var(--accent-text)]' : 'text-[var(--text-tertiary)] hover:text-[var(--text-primary)]'}`}
-            >
-              <VideoIcon className="h-3.5 w-3.5" /> 生视频画布
-            </button>
-          </div>
-          <button type="button" onClick={() => updateViewport({ ...viewport, zoom: viewport.zoom - 0.1 })} className="rounded border border-[var(--border-primary)] p-2 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]" title="缩小">
-            <Minus className="h-3.5 w-3.5" />
-          </button>
-          <span className="w-12 text-center font-mono text-[10px] text-[var(--text-muted)]">{Math.round(viewport.zoom * 100)}%</span>
-          <button type="button" onClick={() => updateViewport({ ...viewport, zoom: viewport.zoom + 0.1 })} className="rounded border border-[var(--border-primary)] p-2 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]" title="放大">
-            <Plus className="h-3.5 w-3.5" />
-          </button>
-          <button type="button" onClick={() => { setViewport(DEFAULT_VIEWPORT); setSelectedNodeId(null); }} className="rounded border border-[var(--border-primary)] p-2 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]" title="重置视图">
-            <Focus className="h-3.5 w-3.5" />
-          </button>
-          <button type="button" onClick={onClose} className="rounded border border-[var(--border-primary)] p-2 text-[var(--text-tertiary)] hover:bg-[var(--error-hover-bg)] hover:text-[var(--error-text)]" title="关闭无限画布">
-            <X className="h-4 w-4" />
-          </button>
+      {/* 浮动警告 / 校验提示横幅 */}
+      {notification && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-lg border border-[var(--warning-border)] bg-[var(--warning-bg)]/95 px-4 py-2 text-xs font-medium text-[var(--warning-text)] shadow-xl backdrop-blur animate-in fade-in slide-in-from-top-2 duration-200">
+          <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
+          <span>{notification}</span>
         </div>
-      </div>
+      )}
 
-      <div className="flex min-h-0 flex-1">
+      {/* 画布主工作区 */}
+      <div className="flex min-h-0 flex-1 relative overflow-hidden">
         <div
+          ref={containerRef}
           className="relative min-w-0 flex-1 cursor-grab overflow-hidden bg-[var(--bg-base)] active:cursor-grabbing"
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
           onWheel={handleWheel}
-          onClick={() => setSelectedNodeId(null)}
         >
-          <div className="pointer-events-none absolute inset-0 opacity-60" style={{ backgroundImage: 'radial-gradient(circle, var(--border-primary) 1px, transparent 1px)', backgroundSize: '22px 22px' }} />
+          {/* 网格点阵背景 */}
+          <div
+            className="pointer-events-none absolute inset-0 opacity-60"
+            style={{
+              backgroundImage:
+                'radial-gradient(circle, var(--border-primary) 1px, transparent 1px)',
+              backgroundSize: '22px 22px',
+            }}
+          />
+
+          {/* 交互提示 */}
           <div className="absolute left-4 top-4 z-10 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-surface)]/90 px-3 py-2 text-[10px] text-[var(--text-muted)] shadow-lg backdrop-blur">
-            拖拽空白处平移 · 拖拽节点整理关系 · 滚轮缩放
+            拖拽空白处平移 · 拖拽节点整理位置 · 拖拽右侧圆点连线 · Delete 键删除
           </div>
 
+          {/* 画布视口缩放容器 */}
           <div
             className="absolute left-0 top-0"
-            style={{ width: WORLD_WIDTH, height: WORLD_HEIGHT, transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`, transformOrigin: 'top left' }}
+            style={{
+              width: WORLD_WIDTH,
+              height: WORLD_HEIGHT,
+              transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+              transformOrigin: 'top left',
+            }}
           >
-            <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" viewBox={`0 0 ${WORLD_WIDTH} ${WORLD_HEIGHT}`} aria-hidden="true">
-              {graph.edges.map((edge) => {
-                const from = nodeMap.get(edge.from);
-                const to = nodeMap.get(edge.to);
-                if (!from || !to) return null;
-                const startX = from.x + NODE_WIDTH;
-                const startY = from.y + 88;
-                const endX = to.x;
-                const endY = to.y + 88;
-                const control = Math.max(60, Math.abs(endX - startX) * 0.45);
-                return (
-                  <path
-                    key={`${edge.from}-${edge.to}`}
-                    d={`M ${startX} ${startY} C ${startX + control} ${startY}, ${endX - control} ${endY}, ${endX} ${endY}`}
-                    fill="none"
-                    stroke="var(--border-secondary)"
-                    strokeWidth="2"
-                    strokeDasharray="5 5"
-                    opacity="0.8"
-                  />
-                );
-              })}
-            </svg>
+            {/* SVG 连线层 (渲染在节点下方) */}
+            <CanvasEdgeLayer
+              edges={graph?.edges || []}
+              nodeMap={nodeMap}
+              selectedEdgeId={selectedEdgeId}
+              connectingState={connectingState}
+              onSelectEdge={(edgeId) => {
+                setSelectedEdgeId(edgeId);
+                setSelectedNodeId(null);
+              }}
+              onDeleteEdge={(edgeId) => {
+                updateGraph((prev) => ({
+                  ...prev,
+                  edges: prev.edges.filter((e) => e.id !== edgeId),
+                }));
+                setSelectedEdgeId(null);
+              }}
+            />
 
-            {graph.nodes.map((node) => (
+            {/* 节点层 */}
+            {(graph?.nodes || []).map((node) => (
               <CanvasNodeCard
                 key={node.id}
                 node={node}
                 selected={selectedNodeId === node.id}
-                onSelect={() => setSelectedNodeId(node.id)}
+                onSelect={() => {
+                  setSelectedNodeId(node.id);
+                  setSelectedEdgeId(null);
+                }}
+                onDelete={() => {
+                  updateGraph((prev) => {
+                    const remainingNodes = prev.nodes.filter((n) => n.id !== node.id);
+                    const remainingEdges = prev.edges.filter(
+                      (e) => e.sourceNodeId !== node.id && e.targetNodeId !== node.id
+                    );
+                    const remainingPositions = { ...(prev.legacyNodePositions || {}) };
+                    delete remainingPositions[node.id];
+                    return {
+                      ...prev,
+                      nodes: remainingNodes,
+                      edges: remainingEdges,
+                      legacyNodePositions: remainingPositions,
+                    };
+                  });
+                  if (selectedNodeId === node.id) setSelectedNodeId(null);
+                }}
                 onOpenShot={onOpenShot}
+                onUpdateData={(patch) => {
+                  updateGraph((prev) => ({
+                    ...prev,
+                    nodes: prev.nodes.map((n) =>
+                      n.id === node.id ? { ...n, data: { ...n.data, ...patch } } : n
+                    ),
+                  }));
+                }}
                 onPointerDown={(event) => handleNodePointerDown(node, event)}
+                onStartConnecting={handleStartConnecting}
               />
             ))}
           </div>
         </div>
 
-        <aside className="hidden w-64 shrink-0 border-l border-[var(--border-primary)] bg-[var(--bg-elevated)] p-5 xl:block">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Canvas overview</p>
-          <h3 className="mt-2 text-sm font-bold text-[var(--text-primary)]">{activeMode === 'image' ? '生图 / 关键帧关系' : '生视频输入链路'}</h3>
+        {/* 右侧属性与概览抽屉 */}
+        <aside className="hidden w-64 shrink-0 border-l border-[var(--border-primary)] bg-[var(--bg-elevated)] p-5 xl:block overflow-y-auto">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+            CANVAS OVERVIEW
+          </p>
+          <h3 className="mt-2 text-sm font-bold text-[var(--text-primary)]">
+            {activeMode === 'image' ? '生图 / 关键帧链路' : '生视频输入与分镜链路'}
+          </h3>
           <p className="mt-2 text-[10px] leading-relaxed text-[var(--text-tertiary)]">
-            画布只展示参考资产、镜头、提示词和结果之间的关系。生成动作仍在原有阶段内完成，并保留原有人工确认与模型配置边界。
+            在此自由编排镜头、参考资产、自定义提示词配置与产物槽位。画布具备持久化拓扑与插槽强类型约束。
           </p>
 
           <div className="mt-5 grid grid-cols-2 gap-2">
             <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-surface)] p-3">
-              <p className="text-[9px] text-[var(--text-muted)]">节点</p>
-              <p className="mt-1 font-mono text-lg text-[var(--text-primary)]">{graph.nodes.length}</p>
+              <p className="text-[9px] text-[var(--text-muted)]">总节点数</p>
+              <p className="mt-1 font-mono text-lg text-[var(--text-primary)]">
+                {graph?.nodes.length || 0}
+              </p>
             </div>
             <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-surface)] p-3">
-              <p className="text-[9px] text-[var(--text-muted)]">结果</p>
-              <p className="mt-1 font-mono text-lg text-[var(--text-primary)]">{generatedCount}/{outputCount}</p>
+              <p className="text-[9px] text-[var(--text-muted)]">连线数</p>
+              <p className="mt-1 font-mono text-lg text-[var(--text-primary)]">
+                {graph?.edges.length || 0}
+              </p>
             </div>
           </div>
 
           <div className="mt-5 space-y-2 border-t border-[var(--border-primary)] pt-4">
+            <p className="text-[9px] font-bold uppercase tracking-wider text-[var(--text-muted)] mb-2">
+              节点分类分布
+            </p>
             {[
-              ['reference', '参考资产'],
-              ['shot', '镜头输入'],
-              ['image', '图像结果'],
-              ['video', '视频结果'],
-            ].map(([kind, label]) => (
-              <div key={kind} className="flex items-center justify-between text-[10px] text-[var(--text-tertiary)]">
-                <span className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${kind === 'reference' ? 'bg-amber-300' : kind === 'shot' ? 'bg-slate-300' : kind === 'image' ? 'bg-violet-300' : 'bg-emerald-300'}`} />{label}</span>
-                <span className="font-mono">{graph.nodes.filter((node) => node.kind === kind).length}</span>
+              ['shot_projection', '镜头投影', 'bg-slate-400'],
+              ['config_node', '配置节点', 'bg-sky-400'],
+              ['reference_slot', '参考槽位', 'bg-amber-400'],
+              ['generation_task', '执行任务', 'bg-blue-400'],
+              ['artifact_output', '媒体产物', 'bg-violet-400'],
+            ].map(([type, label, dotColor]) => (
+              <div
+                key={type}
+                className="flex items-center justify-between text-[10px] text-[var(--text-tertiary)]"
+              >
+                <span className="flex items-center gap-2">
+                  <span className={`h-2 w-2 rounded-full ${dotColor}`} />
+                  {label}
+                </span>
+                <span className="font-mono">
+                  {(graph?.nodes || []).filter((node) => node.type === type).length}
+                </span>
               </div>
             ))}
           </div>
 
+          {/* 选中节点详情面板 */}
           {selectedNode && (
-            <div className="mt-5 rounded-lg border border-[var(--accent-border)] bg-[var(--accent-bg)] p-3">
-              <p className="text-[9px] font-bold uppercase tracking-wider text-[var(--accent-text)]">当前节点</p>
-              <p className="mt-1 text-xs font-bold text-[var(--text-primary)]">{selectedNode.title}</p>
-              <p className="mt-1 line-clamp-4 text-[10px] leading-relaxed text-[var(--text-secondary)]">{selectedNode.subtitle}</p>
-              {selectedNode.shotId && onOpenShot && (
-                <button type="button" onClick={() => onOpenShot(selectedNode.shotId!)} className="mt-3 text-[10px] font-bold text-[var(--accent-text)] hover:underline">
-                  返回镜头工作台 →
+            <div className="mt-5 rounded-lg border border-[var(--accent-border)] bg-[var(--accent-bg)] p-3 space-y-2">
+              <p className="text-[9px] font-bold uppercase tracking-wider text-[var(--accent-text)]">
+                当前选中节点
+              </p>
+              <p className="text-xs font-bold text-[var(--text-primary)] truncate">
+                {String(selectedNode.data?.title || selectedNode.id)}
+              </p>
+              <p className="text-[9px] font-mono text-[var(--text-muted)]">
+                类型: {selectedNode.type}
+              </p>
+              {selectedNode.data?.prompt !== undefined && (
+                <div className="text-[10px] leading-relaxed text-[var(--text-secondary)] line-clamp-3 bg-[var(--bg-base)]/50 p-2 rounded">
+                  {String(selectedNode.data.prompt || '暂无提示词')}
+                </div>
+              )}
+              {selectedNode.data?.shotId && onOpenShot && (
+                <button
+                  type="button"
+                  onClick={() => onOpenShot(String(selectedNode.data.shotId))}
+                  className="mt-2 inline-flex items-center gap-1 text-[10px] font-bold text-[var(--accent-text)] hover:underline"
+                >
+                  前往对应镜头工作台 →
                 </button>
               )}
+            </div>
+          )}
+
+          {/* 选中连线详情面板 */}
+          {selectedEdgeId && (
+            <div className="mt-5 rounded-lg border border-[var(--accent-border)] bg-[var(--accent-bg)] p-3 space-y-2">
+              <p className="text-[9px] font-bold uppercase tracking-wider text-[var(--accent-text)]">
+                当前选中连线
+              </p>
+              <p className="text-[9px] font-mono text-[var(--text-muted)] truncate">
+                ID: {selectedEdgeId}
+              </p>
+              <button
+                type="button"
+                onClick={handleDeleteSelected}
+                className="w-full mt-2 rounded border border-[var(--error-border)] bg-[var(--error-hover-bg)] py-1 text-[10px] font-medium text-[var(--error-text)] hover:opacity-90"
+              >
+                删除此连线
+              </button>
             </div>
           )}
         </aside>

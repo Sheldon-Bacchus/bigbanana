@@ -192,6 +192,12 @@ export const createMediaProxyHandler = (options = {}) => {
         return;
       }
 
+      // 生产态健康探针契约（006 contracts/startup.md:97）：200 { status: 'ok' }
+      if (pathname === '/api/media-proxy/health') {
+        writeJson(res, 200, { status: 'ok', ok: true, service: 'media-proxy' });
+        return;
+      }
+
       if (pathname === '/api/media-proxy') {
         await handleProxyRequest(req, res, requestUrl);
         return;

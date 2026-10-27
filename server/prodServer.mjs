@@ -155,7 +155,8 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (pathname === '/api/media-proxy') {
+  // 前缀匹配：/api/media-proxy/health 等子路径必须进入媒体代理，不能落到 SPA 静态回退
+  if (pathname === '/api/media-proxy' || pathname.startsWith('/api/media-proxy/')) {
     Promise.resolve(mediaProxy(req, res)).catch(() => {
       sendJson(res, 500, { error: 'Media proxy failed.' });
     });

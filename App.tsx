@@ -13,7 +13,7 @@ import NewApiConsole from './components/NewApiConsole';
 import Onboarding, { shouldShowOnboarding, resetOnboarding } from './components/Onboarding';
 import ModelConfigModal from './components/ModelConfig';
 import { ProjectState } from './types';
-import { Save, CheckCircle } from 'lucide-react';
+import { Save, CheckCircle, Maximize2 } from 'lucide-react';
 import { saveEpisode, loadEpisode } from './services/storageService';
 import { setGlobalApiKey } from './services/aiService';
 import { setLogCallback, clearLogCallback } from './services/renderLogService';
@@ -294,12 +294,25 @@ function EpisodeWorkspace() {
           );
         })()}
         {renderStage()}
+        {!canvasMode && (
+          <div className="absolute top-4 right-28 z-40 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setCanvasMode('image')}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--border-primary)] bg-[var(--bg-elevated)]/90 hover:bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] shadow-sm backdrop-blur transition-all active:scale-95"
+              title="打开可生成无限画布"
+            >
+              <Maximize2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+              <span>无限画布</span>
+            </button>
+          </div>
+        )}
         {canvasMode && (
           <InfiniteCanvas
             project={currentEpisode}
             initialMode={canvasMode}
             onClose={() => setCanvasMode(null)}
-            onOpenShot={() => {
+            onOpenShot={(shotId?: string) => {
               setCanvasMode(null);
               updateEpisode({ stage: 'director' });
             }}

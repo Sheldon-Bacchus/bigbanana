@@ -76,13 +76,11 @@ E:\all-agent-workspace\BigBanana/
 为配合用户“全流程调度 Gemini / AGY 模型”的要求，所有参与协作的 Agent 必须遵循以下路由与纪律：
 
 ### 3.1 DSH 原生 Team 队员命名规则（关键门禁）
-宿主已加载 [`dsh-subagent-model-config`](file:///C:/Users/ldc/.dsh/profiles/desktop/node_modules/dsh-subagent-model-config/config.json)。**队员的命名直接决定其分配的底层大模型**：
-- **必须匹配规则前缀**：队员创建（`spawn_teammate`）时，名称必须使用以下前缀：
-  - `agy-*`（例如 `agy-repo-smith`, `agy-architect`, `agy-coder`）
-  - `gemin*`（例如 `gemini-auditor`）
-  - `worker*`, `sub-*`, `reviewer*`, `audit*`
-- **命中效果**：宿主插件拦截名称后，自动在 `startActivation` 阶段注入 `provider: "antigravity", model: "gemini-3.8-flash"`。
-- **未命中的后果**：若命名为普通名称（如 `bob`, `repo-smith`），将无法命中规则，直接回退并继承主会话默认模型（当前为 `deepseek-v4.1-flash`）。
+宿主已通过**本地 link 安装**（非社区市场下载）加载 [`dsh-subagent-model-config`](file:///E:/all-agent-workspace/dsh-projects/external/dsh-subagent-model-config) v0.3.2：
+- **安装方式**：源目录 `E:/all-agent-workspace/dsh-projects/external/dsh-subagent-model-config`；desktop profile 用 Junction + `link:` 依赖 + `dsh.profile.bundles` 加载，实测**热生效、无需重启**。
+- **命名规则**：`spawn_teammate` 名称命中 `agy-*` / `gemin*` / `worker*` / `sub-*` / `reviewer*` / `audit*` 等规则后，自动在 `startActivation` 阶段注入 `provider: "antigravity", model: "gemini-3.8-flash"`。
+- **原生 Sub 支持（本机补丁）**：`subagent` 工具无 name 参数，但会把 `description` 作为 `spec.label` 传入；插件已加 label 回退（仅当无编队队员名时生效），因此 description 以 `agy-` 等前缀开头同样可注入 AGY。证据：插件目录 `.probe.jsonl` 中 `startActivation-called` 的 `nameSource: "label"` 记录。
+- **未命中的后果**：普通名称回退主会话默认模型。安装/回滚细节见 `ADAPTATION-20261026.md`（同插件目录）。
 
 ### 3.2 外部 AGY CLI (`agy.exe`) 并发调用
 针对需要深度思考、红蓝审查或无环境冲突的分析任务，可直接调用本地 AGY 命令行工具：

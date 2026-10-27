@@ -1,18 +1,37 @@
-import { ProjectState, AssetLibraryItem, SeriesProject, Series, Episode } from '../types';
-import { runV2ToV3Migration, runEpisodeTitleFixMigration } from './migrationService';
+import {
+  ProjectState,
+  AssetLibraryItem,
+  SeriesProject,
+  Series,
+  Episode,
+  CanvasGraphEntity,
+  GenerationTaskEntity,
+  MediaVersionEntity,
+  CommitRecordEntity,
+} from '../types';
+import {
+  runV2ToV3Migration,
+  runEpisodeTitleFixMigration,
+  runV3ToV4Migration,
+  generateV4BaselineFromEpisodes,
+} from './migrationService';
 import { materializeProjectVideosForExport, migrateProjectVideosToOPFS } from './videoStorageService';
 import { reconcileShotSceneIds } from './storyboardIdUtils';
 import { sanitizePromptTemplateOverrides } from './promptTemplateService';
 import { normalizeChatModelId } from './modelIdUtils';
 
-const DB_NAME = 'BigBananaDB';
-const DB_VERSION = 3;
-const STORE_NAME = 'projects';
-const ASSET_STORE_NAME = 'assetLibrary';
-const SP_STORE = 'seriesProjects';
-const SERIES_STORE = 'series';
-const EP_STORE = 'episodes';
-const EXPORT_SCHEMA_VERSION = 3;
+export const DB_NAME = 'BigBananaDB';
+export const DB_VERSION = 4;
+export const STORE_NAME = 'projects';
+export const ASSET_STORE_NAME = 'assetLibrary';
+export const SP_STORE = 'seriesProjects';
+export const SERIES_STORE = 'series';
+export const EP_STORE = 'episodes';
+export const CANVAS_GRAPH_STORE = 'canvas_graphs';
+export const GENERATION_TASK_STORE = 'generation_tasks';
+export const MEDIA_VERSION_STORE = 'media_versions';
+export const COMMIT_RECORD_STORE = 'commit_records';
+export const EXPORT_SCHEMA_VERSION = 4;
 
 export interface IndexedDBExportPayload {
   schemaVersion: number;
@@ -26,6 +45,10 @@ export interface IndexedDBExportPayload {
     seriesProjects?: SeriesProject[];
     series?: Series[];
     episodes?: Episode[];
+    canvasGraphs?: CanvasGraphEntity[];
+    generationTasks?: GenerationTaskEntity[];
+    mediaVersions?: MediaVersionEntity[];
+    commitRecords?: CommitRecordEntity[];
   };
 }
 
@@ -40,13 +63,18 @@ const openDB = (): Promise<IDBDatabase> => {
     request.onsuccess = () => {
       const db = request.result;
       db.onclose = () => { dbPromise = null; };
-      runV2ToV3Migration(db)
-        .then(() => runEpisodeTitleFixMigration(db))
+      Promise.resolve()
+        .then(() => runV2ToV3Migration(db).catch(e => console.error('Migration error (v2->v3, non-fatal):', e)))
+        .then(() => runEpisodeTitleFixMigration(db).catch(e => console.error('Migration error (title fix, non-fatal):', e)))
+        .then(() => runV3ToV4Migration(db).catch(e => console.error('Migration error (v3->v4, non-fatal):', e)))
         .then(() => resolve(db))
-        .catch((e) => { console.error('Migration error (non-fatal):', e); resolve(db); });
+        .catch((e) => { console.error('Migration chain unexpected error (non-fatal):', e); resolve(db); });
     };
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
+      const tx = (event.target as IDBOpenDBRequest).transaction;
+      if (!tx) return;
+
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME, { keyPath: 'id' });
       }
@@ -56,14 +84,62 @@ const openDB = (): Promise<IDBDatabase> => {
       if (!db.objectStoreNames.contains(SP_STORE)) {
         db.createObjectStore(SP_STORE, { keyPath: 'id' });
       }
-      if (!db.objectStoreNames.contains(SERIES_STORE)) {
-        const ss = db.createObjectStore(SERIES_STORE, { keyPath: 'id' });
+
+      const ss = !db.objectStoreNames.contains(SERIES_STORE)
+        ? db.createObjectStore(SERIES_STORE, { keyPath: 'id' })
+        : tx.objectStore(SERIES_STORE);
+      if (!ss.indexNames.contains('projectId')) {
         ss.createIndex('projectId', 'projectId', { unique: false });
       }
-      if (!db.objectStoreNames.contains(EP_STORE)) {
-        const es = db.createObjectStore(EP_STORE, { keyPath: 'id' });
+
+      const es = !db.objectStoreNames.contains(EP_STORE)
+        ? db.createObjectStore(EP_STORE, { keyPath: 'id' })
+        : tx.objectStore(EP_STORE);
+      if (!es.indexNames.contains('projectId')) {
         es.createIndex('projectId', 'projectId', { unique: false });
+      }
+      if (!es.indexNames.contains('seriesId')) {
         es.createIndex('seriesId', 'seriesId', { unique: false });
+      }
+
+      const cgs = !db.objectStoreNames.contains(CANVAS_GRAPH_STORE)
+        ? db.createObjectStore(CANVAS_GRAPH_STORE, { keyPath: 'id' })
+        : tx.objectStore(CANVAS_GRAPH_STORE);
+      if (!cgs.indexNames.contains('episodeId')) {
+        cgs.createIndex('episodeId', 'episodeId', { unique: false });
+      }
+      if (!cgs.indexNames.contains('episodeId_mode')) {
+        cgs.createIndex('episodeId_mode', ['episodeId', 'mode'], { unique: false });
+      }
+
+      const gts = !db.objectStoreNames.contains(GENERATION_TASK_STORE)
+        ? db.createObjectStore(GENERATION_TASK_STORE, { keyPath: 'id' })
+        : tx.objectStore(GENERATION_TASK_STORE);
+      if (!gts.indexNames.contains('graphId')) {
+        gts.createIndex('graphId', 'graphId', { unique: false });
+      }
+      if (!gts.indexNames.contains('status')) {
+        gts.createIndex('status', 'status', { unique: false });
+      }
+
+      const mvs = !db.objectStoreNames.contains(MEDIA_VERSION_STORE)
+        ? db.createObjectStore(MEDIA_VERSION_STORE, { keyPath: 'id' })
+        : tx.objectStore(MEDIA_VERSION_STORE);
+      if (!mvs.indexNames.contains('targetId')) {
+        mvs.createIndex('targetId', 'targetId', { unique: false });
+      }
+      if (!mvs.indexNames.contains('targetType_targetId')) {
+        mvs.createIndex('targetType_targetId', ['targetType', 'targetId'], { unique: false });
+      }
+
+      const crs = !db.objectStoreNames.contains(COMMIT_RECORD_STORE)
+        ? db.createObjectStore(COMMIT_RECORD_STORE, { keyPath: 'id' })
+        : tx.objectStore(COMMIT_RECORD_STORE);
+      if (!crs.indexNames.contains('targetId')) {
+        crs.createIndex('targetId', 'targetId', { unique: false });
+      }
+      if (!crs.indexNames.contains('status')) {
+        crs.createIndex('status', 'status', { unique: false });
       }
     };
   });
@@ -453,18 +529,288 @@ export const deleteAssetFromLibrary = async (id: string): Promise<void> => {
 };
 
 // =============================================
+// CanvasGraph CRUD (v4)
+// =============================================
+
+export const getCanvasGraph = async (
+  episodeId: string,
+  mode: 'image' | 'video'
+): Promise<CanvasGraphEntity | null> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CANVAS_GRAPH_STORE, 'readonly');
+    const store = tx.objectStore(CANVAS_GRAPH_STORE);
+    if (store.indexNames.contains('episodeId_mode')) {
+      const idx = store.index('episodeId_mode');
+      const req = idx.get([episodeId, mode]);
+      req.onsuccess = () => resolve((req.result as CanvasGraphEntity) || null);
+      req.onerror = () => reject(req.error);
+    } else if (store.indexNames.contains('episodeId')) {
+      const idx = store.index('episodeId');
+      const req = idx.getAll(episodeId);
+      req.onsuccess = () => {
+        const items = (req.result as CanvasGraphEntity[]) || [];
+        const match = items.find(g => g.mode === mode) || null;
+        resolve(match);
+      };
+      req.onerror = () => reject(req.error);
+    } else {
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const items = (req.result as CanvasGraphEntity[]) || [];
+        const match = items.find(g => g.episodeId === episodeId && g.mode === mode) || null;
+        resolve(match);
+      };
+      req.onerror = () => reject(req.error);
+    }
+  });
+};
+
+export const saveCanvasGraph = async (graph: CanvasGraphEntity): Promise<void> => {
+  const db = await openDB();
+  const normalized: CanvasGraphEntity = {
+    ...graph,
+    updatedAt: Date.now(),
+  };
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CANVAS_GRAPH_STORE, 'readwrite');
+    tx.objectStore(CANVAS_GRAPH_STORE).put(normalized);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+export const deleteCanvasGraph = async (
+  episodeId: string,
+  mode: 'image' | 'video'
+): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CANVAS_GRAPH_STORE, 'readwrite');
+    const store = tx.objectStore(CANVAS_GRAPH_STORE);
+    if (store.indexNames.contains('episodeId_mode')) {
+      const idx = store.index('episodeId_mode');
+      const req = idx.get([episodeId, mode]);
+      req.onsuccess = () => {
+        const found = req.result as CanvasGraphEntity | undefined;
+        if (found && found.id) {
+          store.delete(found.id);
+        }
+      };
+      req.onerror = () => reject(req.error);
+    } else if (store.indexNames.contains('episodeId')) {
+      const idx = store.index('episodeId');
+      const req = idx.getAll(episodeId);
+      req.onsuccess = () => {
+        const items = (req.result as CanvasGraphEntity[]) || [];
+        items.filter(g => g.mode === mode).forEach(g => store.delete(g.id));
+      };
+      req.onerror = () => reject(req.error);
+    } else {
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const items = (req.result as CanvasGraphEntity[]) || [];
+        items
+          .filter(g => g.episodeId === episodeId && g.mode === mode)
+          .forEach(g => store.delete(g.id));
+      };
+      req.onerror = () => reject(req.error);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+// =============================================
+// MediaVersion & CommitRecord & Task CRUD (v4)
+// =============================================
+
+export const listMediaVersions = async (
+  targetType?: string,
+  targetId?: string
+): Promise<MediaVersionEntity[]> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MEDIA_VERSION_STORE, 'readonly');
+    const store = tx.objectStore(MEDIA_VERSION_STORE);
+    let req: IDBRequest;
+    if (targetType && targetId && store.indexNames.contains('targetType_targetId')) {
+      const idx = store.index('targetType_targetId');
+      req = idx.getAll([targetType, targetId]);
+    } else if (targetId && store.indexNames.contains('targetId')) {
+      const idx = store.index('targetId');
+      req = idx.getAll(targetId);
+    } else {
+      req = store.getAll();
+    }
+    req.onsuccess = () => {
+      let results = (req.result as MediaVersionEntity[]) || [];
+      if (targetType) {
+        results = results.filter(v => v.targetType === targetType);
+      }
+      if (targetId) {
+        results = results.filter(v => v.targetId === targetId);
+      }
+      results.sort((a, b) => a.versionNumber - b.versionNumber);
+      resolve(results);
+    };
+    req.onerror = () => reject(req.error);
+  });
+};
+
+export const saveMediaVersion = async (version: MediaVersionEntity): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MEDIA_VERSION_STORE, 'readwrite');
+    tx.objectStore(MEDIA_VERSION_STORE).put(version);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+export const listCommitRecords = async (targetId: string): Promise<CommitRecordEntity[]> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(COMMIT_RECORD_STORE, 'readonly');
+    const store = tx.objectStore(COMMIT_RECORD_STORE);
+    let req: IDBRequest;
+    if (targetId && store.indexNames.contains('targetId')) {
+      const idx = store.index('targetId');
+      req = idx.getAll(targetId);
+    } else {
+      req = store.getAll();
+    }
+    req.onsuccess = () => {
+      let results = (req.result as CommitRecordEntity[]) || [];
+      if (targetId) {
+        results = results.filter(r => r.targetId === targetId);
+      }
+      results.sort((a, b) => b.timestamp - a.timestamp);
+      resolve(results);
+    };
+    req.onerror = () => reject(req.error);
+  });
+};
+
+export const saveCommitRecord = async (record: CommitRecordEntity): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(COMMIT_RECORD_STORE, 'readwrite');
+    tx.objectStore(COMMIT_RECORD_STORE).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+export const listGenerationTasks = async (graphId: string): Promise<GenerationTaskEntity[]> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(GENERATION_TASK_STORE, 'readonly');
+    const store = tx.objectStore(GENERATION_TASK_STORE);
+    let req: IDBRequest;
+    if (graphId && store.indexNames.contains('graphId')) {
+      const idx = store.index('graphId');
+      req = idx.getAll(graphId);
+    } else {
+      req = store.getAll();
+    }
+    req.onsuccess = () => {
+      let results = (req.result as GenerationTaskEntity[]) || [];
+      if (graphId) {
+        results = results.filter(t => t.graphId === graphId);
+      }
+      results.sort((a, b) => a.createdAt - b.createdAt);
+      resolve(results);
+    };
+    req.onerror = () => reject(req.error);
+  });
+};
+
+export const saveGenerationTask = async (task: GenerationTaskEntity): Promise<void> => {
+  const db = await openDB();
+  const normalized: GenerationTaskEntity = {
+    ...task,
+    updatedAt: Date.now(),
+  };
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(GENERATION_TASK_STORE, 'readwrite');
+    tx.objectStore(GENERATION_TASK_STORE).put(normalized);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+const collectTargetIdsFromEpisodes = (episodes: Episode[]): Set<string> => {
+  const ids = new Set<string>();
+  for (const ep of episodes) {
+    if (!ep) continue;
+    if (ep.id) ids.add(ep.id);
+    (ep.shots || []).forEach(shot => {
+      if (shot.id) ids.add(shot.id);
+      (shot.keyframes || []).forEach(kf => {
+        if (kf.id) ids.add(kf.id);
+      });
+    });
+    (ep.characterRefs || []).forEach(r => ids.add(r.characterId));
+    (ep.sceneRefs || []).forEach(r => ids.add(r.sceneId));
+    (ep.propRefs || []).forEach(r => ids.add(r.propId));
+    if (ep.scriptData) {
+      (ep.scriptData.characters || []).forEach(c => {
+        if (c.id) ids.add(c.id);
+        if (c.libraryId) ids.add(c.libraryId);
+      });
+      (ep.scriptData.scenes || []).forEach(s => {
+        if (s.id) ids.add(s.id);
+        if (s.libraryId) ids.add(s.libraryId);
+      });
+      (ep.scriptData.props || []).forEach(p => {
+        if (p.id) ids.add(p.id);
+        if (p.libraryId) ids.add(p.libraryId);
+      });
+    }
+  }
+  return ids;
+};
+
+// =============================================
 // Export / Import
 // =============================================
 
 export const exportIndexedDBData = async (): Promise<IndexedDBExportPayload> => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const storeNames = [ASSET_STORE_NAME, SP_STORE, SERIES_STORE, EP_STORE];
+    const storeCandidates = [
+      STORE_NAME,
+      ASSET_STORE_NAME,
+      SP_STORE,
+      SERIES_STORE,
+      EP_STORE,
+      CANVAS_GRAPH_STORE,
+      GENERATION_TASK_STORE,
+      MEDIA_VERSION_STORE,
+      COMMIT_RECORD_STORE,
+    ];
+    const storeNames = storeCandidates.filter(name => db.objectStoreNames.contains(name));
     const tx = db.transaction(storeNames, 'readonly');
+    const projectReq = db.objectStoreNames.contains(STORE_NAME)
+      ? tx.objectStore(STORE_NAME).getAll()
+      : null;
     const assetReq = tx.objectStore(ASSET_STORE_NAME).getAll();
     const spReq = tx.objectStore(SP_STORE).getAll();
     const seriesReq = tx.objectStore(SERIES_STORE).getAll();
     const epReq = tx.objectStore(EP_STORE).getAll();
+    const canvasReq = db.objectStoreNames.contains(CANVAS_GRAPH_STORE)
+      ? tx.objectStore(CANVAS_GRAPH_STORE).getAll()
+      : null;
+    const taskReq = db.objectStoreNames.contains(GENERATION_TASK_STORE)
+      ? tx.objectStore(GENERATION_TASK_STORE).getAll()
+      : null;
+    const mediaReq = db.objectStoreNames.contains(MEDIA_VERSION_STORE)
+      ? tx.objectStore(MEDIA_VERSION_STORE).getAll()
+      : null;
+    const commitReq = db.objectStoreNames.contains(COMMIT_RECORD_STORE)
+      ? tx.objectStore(COMMIT_RECORD_STORE).getAll()
+      : null;
 
     tx.oncomplete = () => {
       void (async () => {
@@ -481,11 +827,15 @@ export const exportIndexedDBData = async (): Promise<IndexedDBExportPayload> => 
             dbName: DB_NAME,
             dbVersion: DB_VERSION,
             stores: {
-              projects: [],
+              projects: (projectReq?.result as ProjectState[]) || [],
               assetLibrary: (assetReq.result as AssetLibraryItem[]) || [],
               seriesProjects: (spReq.result as SeriesProject[]) || [],
               series: (seriesReq.result as Series[]) || [],
               episodes: portableEpisodes as Episode[],
+              canvasGraphs: (canvasReq?.result as CanvasGraphEntity[]) || [],
+              generationTasks: (taskReq?.result as GenerationTaskEntity[]) || [],
+              mediaVersions: (mediaReq?.result as MediaVersionEntity[]) || [],
+              commitRecords: (commitReq?.result as CommitRecordEntity[]) || [],
             },
           });
         } catch (error) {
@@ -499,27 +849,154 @@ export const exportIndexedDBData = async (): Promise<IndexedDBExportPayload> => 
 
 export const exportProjectData = async (project: ProjectState): Promise<IndexedDBExportPayload> => {
   const portableProject = await materializeProjectVideosForExport(project);
-  return {
-    schemaVersion: EXPORT_SCHEMA_VERSION,
-    exportedAt: Date.now(),
-    scope: 'episode',
-    dbName: DB_NAME,
-    dbVersion: DB_VERSION,
-    stores: {
-      projects: [portableProject],
-      assetLibrary: [],
-    },
-  };
+  const db = await openDB();
+
+  return new Promise((resolve, reject) => {
+    const storeCandidates = [
+      ASSET_STORE_NAME,
+      SP_STORE,
+      SERIES_STORE,
+      CANVAS_GRAPH_STORE,
+      GENERATION_TASK_STORE,
+      MEDIA_VERSION_STORE,
+      COMMIT_RECORD_STORE,
+    ];
+    const availableStores = storeCandidates.filter(name => db.objectStoreNames.contains(name));
+    if (availableStores.length === 0) {
+      resolve({
+        schemaVersion: EXPORT_SCHEMA_VERSION,
+        exportedAt: Date.now(),
+        scope: 'episode',
+        dbName: DB_NAME,
+        dbVersion: DB_VERSION,
+        stores: {
+          projects: [portableProject],
+          assetLibrary: [],
+          seriesProjects: [],
+          series: [],
+          episodes: [portableProject],
+          canvasGraphs: [],
+          generationTasks: [],
+          mediaVersions: [],
+          commitRecords: [],
+        },
+      });
+      return;
+    }
+
+    const tx = db.transaction(availableStores, 'readonly');
+    const assetReq = db.objectStoreNames.contains(ASSET_STORE_NAME)
+      ? tx.objectStore(ASSET_STORE_NAME).getAll()
+      : null;
+    const spReq = (project.projectId && db.objectStoreNames.contains(SP_STORE))
+      ? tx.objectStore(SP_STORE).get(project.projectId)
+      : null;
+    const seriesReq = (project.seriesId && db.objectStoreNames.contains(SERIES_STORE))
+      ? tx.objectStore(SERIES_STORE).get(project.seriesId)
+      : null;
+    const canvasReq = db.objectStoreNames.contains(CANVAS_GRAPH_STORE)
+      ? tx.objectStore(CANVAS_GRAPH_STORE).getAll()
+      : null;
+    const taskReq = db.objectStoreNames.contains(GENERATION_TASK_STORE)
+      ? tx.objectStore(GENERATION_TASK_STORE).getAll()
+      : null;
+    const mediaReq = db.objectStoreNames.contains(MEDIA_VERSION_STORE)
+      ? tx.objectStore(MEDIA_VERSION_STORE).getAll()
+      : null;
+    const commitReq = db.objectStoreNames.contains(COMMIT_RECORD_STORE)
+      ? tx.objectStore(COMMIT_RECORD_STORE).getAll()
+      : null;
+
+    tx.oncomplete = () => {
+      try {
+        const allCanvasGraphs = (canvasReq?.result as CanvasGraphEntity[]) || [];
+        const canvasGraphs = allCanvasGraphs.filter(g => g.episodeId === project.id);
+        const graphIds = new Set(canvasGraphs.map(g => g.id));
+
+        const allTasks = (taskReq?.result as GenerationTaskEntity[]) || [];
+        const generationTasks = allTasks.filter(t => graphIds.has(t.graphId));
+
+        const targetIds = collectTargetIdsFromEpisodes([project]);
+        canvasGraphs.forEach(g => {
+          (g.nodes || []).forEach(n => {
+            if (n.sourceRef?.shotId) targetIds.add(n.sourceRef.shotId);
+            if (n.sourceRef?.keyframeId) targetIds.add(n.sourceRef.keyframeId);
+            if (n.sourceRef?.intervalId) targetIds.add(n.sourceRef.intervalId);
+          });
+        });
+
+        const allAssets = (assetReq?.result as AssetLibraryItem[]) || [];
+        const matchedAssets = allAssets.filter(item => targetIds.has(item.id));
+
+        const allMedia = (mediaReq?.result as MediaVersionEntity[]) || [];
+        const mediaVersions = allMedia.filter(v => targetIds.has(v.targetId));
+
+        const allCommits = (commitReq?.result as CommitRecordEntity[]) || [];
+        const commitRecords = allCommits.filter(c => targetIds.has(c.targetId));
+
+        const sp = spReq?.result as SeriesProject | undefined;
+        const s = seriesReq?.result as Series | undefined;
+
+        resolve({
+          schemaVersion: EXPORT_SCHEMA_VERSION,
+          exportedAt: Date.now(),
+          scope: 'episode',
+          dbName: DB_NAME,
+          dbVersion: DB_VERSION,
+          stores: {
+            projects: [portableProject],
+            assetLibrary: matchedAssets,
+            seriesProjects: sp ? [sp] : [],
+            series: s ? [s] : [],
+            episodes: [portableProject],
+            canvasGraphs,
+            generationTasks,
+            mediaVersions,
+            commitRecords,
+          },
+        });
+      } catch (err) {
+        reject(err);
+      }
+    };
+    tx.onerror = () => reject(tx.error);
+  });
 };
 
 export const exportSeriesProjectData = async (projectId: string): Promise<IndexedDBExportPayload> => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const storeNames = [SP_STORE, SERIES_STORE, EP_STORE];
-    const tx = db.transaction(storeNames, 'readonly');
+    const storeCandidates = [
+      STORE_NAME,
+      ASSET_STORE_NAME,
+      SP_STORE,
+      SERIES_STORE,
+      EP_STORE,
+      CANVAS_GRAPH_STORE,
+      GENERATION_TASK_STORE,
+      MEDIA_VERSION_STORE,
+      COMMIT_RECORD_STORE,
+    ];
+    const availableStores = storeCandidates.filter(name => db.objectStoreNames.contains(name));
+    const tx = db.transaction(availableStores, 'readonly');
     const spReq = tx.objectStore(SP_STORE).get(projectId);
     const seriesReq = tx.objectStore(SERIES_STORE).index('projectId').getAll(projectId);
     const epReq = tx.objectStore(EP_STORE).index('projectId').getAll(projectId);
+    const assetReq = db.objectStoreNames.contains(ASSET_STORE_NAME)
+      ? tx.objectStore(ASSET_STORE_NAME).getAll()
+      : null;
+    const canvasReq = db.objectStoreNames.contains(CANVAS_GRAPH_STORE)
+      ? tx.objectStore(CANVAS_GRAPH_STORE).getAll()
+      : null;
+    const taskReq = db.objectStoreNames.contains(GENERATION_TASK_STORE)
+      ? tx.objectStore(GENERATION_TASK_STORE).getAll()
+      : null;
+    const mediaReq = db.objectStoreNames.contains(MEDIA_VERSION_STORE)
+      ? tx.objectStore(MEDIA_VERSION_STORE).getAll()
+      : null;
+    const commitReq = db.objectStoreNames.contains(COMMIT_RECORD_STORE)
+      ? tx.objectStore(COMMIT_RECORD_STORE).getAll()
+      : null;
 
     tx.oncomplete = () => {
       void (async () => {
@@ -535,6 +1012,32 @@ export const exportSeriesProjectData = async (projectId: string): Promise<Indexe
             rawEpisodes.map(ep => materializeProjectVideosForExport(ep))
           );
 
+          const episodeIds = new Set(rawEpisodes.map(ep => ep.id));
+          const allGraphs = (canvasReq?.result as CanvasGraphEntity[]) || [];
+          const canvasGraphs = allGraphs.filter(g => episodeIds.has(g.episodeId));
+
+          const graphIds = new Set(canvasGraphs.map(g => g.id));
+          const allTasks = (taskReq?.result as GenerationTaskEntity[]) || [];
+          const generationTasks = allTasks.filter(t => graphIds.has(t.graphId));
+
+          const targetIds = collectTargetIdsFromEpisodes(rawEpisodes);
+          canvasGraphs.forEach(g => {
+            (g.nodes || []).forEach(n => {
+              if (n.sourceRef?.shotId) targetIds.add(n.sourceRef.shotId);
+              if (n.sourceRef?.keyframeId) targetIds.add(n.sourceRef.keyframeId);
+              if (n.sourceRef?.intervalId) targetIds.add(n.sourceRef.intervalId);
+            });
+          });
+
+          const allAssets = (assetReq?.result as AssetLibraryItem[]) || [];
+          const matchedAssets = allAssets.filter(item => targetIds.has(item.id));
+
+          const allMedia = (mediaReq?.result as MediaVersionEntity[]) || [];
+          const mediaVersions = allMedia.filter(v => targetIds.has(v.targetId));
+
+          const allCommits = (commitReq?.result as CommitRecordEntity[]) || [];
+          const commitRecords = allCommits.filter(c => targetIds.has(c.targetId));
+
           resolve({
             schemaVersion: EXPORT_SCHEMA_VERSION,
             exportedAt: Date.now(),
@@ -543,10 +1046,14 @@ export const exportSeriesProjectData = async (projectId: string): Promise<Indexe
             dbVersion: DB_VERSION,
             stores: {
               projects: [],
-              assetLibrary: [],
+              assetLibrary: matchedAssets,
               seriesProjects: [seriesProject],
               series: (seriesReq.result as Series[]) || [],
               episodes: portableEpisodes as Episode[],
+              canvasGraphs,
+              generationTasks,
+              mediaVersions,
+              commitRecords,
             },
           });
         } catch (error) {
@@ -582,7 +1089,19 @@ export const importIndexedDBData = async (
     })
   );
 
-  const storeNames = [ASSET_STORE_NAME, SP_STORE, SERIES_STORE, EP_STORE];
+  const storeCandidates = [
+    STORE_NAME,
+    ASSET_STORE_NAME,
+    SP_STORE,
+    SERIES_STORE,
+    EP_STORE,
+    CANVAS_GRAPH_STORE,
+    GENERATION_TASK_STORE,
+    MEDIA_VERSION_STORE,
+    COMMIT_RECORD_STORE,
+  ];
+  const storeNames = storeCandidates.filter(name => db.objectStoreNames.contains(name));
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeNames, 'readwrite');
 
@@ -591,20 +1110,38 @@ export const importIndexedDBData = async (
     }
 
     let count = 0;
-    const assetStore = tx.objectStore(ASSET_STORE_NAME);
-    (payload.stores.assetLibrary || []).forEach((item: AssetLibraryItem) => {
-      assetStore.put(item);
-      count++;
-    });
+    const assetStore = db.objectStoreNames.contains(ASSET_STORE_NAME)
+      ? tx.objectStore(ASSET_STORE_NAME)
+      : null;
+    if (assetStore) {
+      (payload.stores.assetLibrary || []).forEach((item: AssetLibraryItem) => {
+        assetStore.put(item);
+        count++;
+      });
+    }
 
-    const spStore = tx.objectStore(SP_STORE);
-    (payload.stores.seriesProjects || []).forEach((sp: SeriesProject) => { spStore.put(sp); count++; });
+    const spStore = db.objectStoreNames.contains(SP_STORE)
+      ? tx.objectStore(SP_STORE)
+      : null;
+    if (spStore) {
+      (payload.stores.seriesProjects || []).forEach((sp: SeriesProject) => { spStore.put(sp); count++; });
+    }
 
-    const seriesStr = tx.objectStore(SERIES_STORE);
-    (payload.stores.series || []).forEach((s: Series) => { seriesStr.put(s); count++; });
+    const seriesStr = db.objectStoreNames.contains(SERIES_STORE)
+      ? tx.objectStore(SERIES_STORE)
+      : null;
+    if (seriesStr) {
+      (payload.stores.series || []).forEach((s: Series) => { seriesStr.put(s); count++; });
+    }
 
-    const epStore = tx.objectStore(EP_STORE);
-    importedEpisodes.forEach((ep: Episode) => { epStore.put(ep); count++; });
+    const epStore = db.objectStoreNames.contains(EP_STORE)
+      ? tx.objectStore(EP_STORE)
+      : null;
+    if (epStore) {
+      importedEpisodes.forEach((ep: Episode) => { epStore.put(ep); count++; });
+    }
+
+    const convertedLegacyEpisodes: Episode[] = [];
 
     if (payload.stores.projects && payload.stores.projects.length > 0 && !(payload.stores.episodes && payload.stores.episodes.length > 0)) {
       payload.stores.projects.forEach((p: any) => {
@@ -637,10 +1174,10 @@ export const importIndexedDBData = async (
           sceneLibrary: scenes.map((s: any) => ({ ...s, version: 1 })),
           propLibrary: props.map((pr: any) => ({ ...pr, version: 1 })),
         };
-        spStore.put(sp);
+        if (spStore) spStore.put(sp);
 
         const s: Series = { id: seriesId, projectId, title: '第一季', sortOrder: 0, createdAt: Date.now(), lastModified: Date.now() };
-        seriesStr.put(s);
+        if (seriesStr) seriesStr.put(s);
 
         const ep: Episode = {
           id: episodeId, projectId, seriesId, episodeNumber: 1,
@@ -663,10 +1200,54 @@ export const importIndexedDBData = async (
           propRefs: props.map((pr: any) => ({ propId: pr.id, syncedVersion: 1, syncStatus: 'synced' as const })),
           promptTemplateOverrides: sanitizePromptTemplateOverrides(p.promptTemplateOverrides),
           scriptGenerationCheckpoint: null,
+          imageCanvas: p.imageCanvas,
+          videoCanvas: p.videoCanvas,
         };
-        epStore.put(normalizeEpisode(ep));
+        const normalizedEp = normalizeEpisode(ep);
+        if (epStore) epStore.put(normalizedEp);
+        convertedLegacyEpisodes.push(normalizedEp);
         count += 3;
       });
+    }
+
+    const canvasStore = db.objectStoreNames.contains(CANVAS_GRAPH_STORE)
+      ? tx.objectStore(CANVAS_GRAPH_STORE)
+      : null;
+    const taskStore = db.objectStoreNames.contains(GENERATION_TASK_STORE)
+      ? tx.objectStore(GENERATION_TASK_STORE)
+      : null;
+    const mediaStore = db.objectStoreNames.contains(MEDIA_VERSION_STORE)
+      ? tx.objectStore(MEDIA_VERSION_STORE)
+      : null;
+    const commitStore = db.objectStoreNames.contains(COMMIT_RECORD_STORE)
+      ? tx.objectStore(COMMIT_RECORD_STORE)
+      : null;
+
+    // 导入新数组 (存在才导入)
+    if (canvasStore && Array.isArray(payload.stores.canvasGraphs) && payload.stores.canvasGraphs.length > 0) {
+      payload.stores.canvasGraphs.forEach((g: CanvasGraphEntity) => canvasStore.put(g));
+    }
+    if (taskStore && Array.isArray(payload.stores.generationTasks) && payload.stores.generationTasks.length > 0) {
+      payload.stores.generationTasks.forEach((t: GenerationTaskEntity) => taskStore.put(t));
+    }
+    if (mediaStore && Array.isArray(payload.stores.mediaVersions) && payload.stores.mediaVersions.length > 0) {
+      payload.stores.mediaVersions.forEach((v: MediaVersionEntity) => mediaStore.put(v));
+    }
+    if (commitStore && Array.isArray(payload.stores.commitRecords) && payload.stores.commitRecords.length > 0) {
+      payload.stores.commitRecords.forEach((c: CommitRecordEntity) => commitStore.put(c));
+    }
+
+    // 若为旧 v2/v3 包 (无新 canvasGraphs 数组，episodes 带 imageCanvas/videoCanvas 或媒体)，自动就地生成基线
+    const isLegacyPackage = (payload.schemaVersion || 0) < 4 || !Array.isArray(payload.stores.canvasGraphs);
+    if (isLegacyPackage && (canvasStore || mediaStore)) {
+      const allEpisodes = [...importedEpisodes, ...convertedLegacyEpisodes];
+      const { canvasGraphs, mediaVersions } = generateV4BaselineFromEpisodes(allEpisodes);
+      if (canvasStore) {
+        canvasGraphs.forEach(g => canvasStore.put(g));
+      }
+      if (mediaStore && (!Array.isArray(payload.stores.mediaVersions) || payload.stores.mediaVersions.length === 0)) {
+        mediaVersions.forEach(v => mediaStore.put(v));
+      }
     }
 
     tx.oncomplete = () => resolve({ projects: count, assets: (payload.stores.assetLibrary || []).length });
