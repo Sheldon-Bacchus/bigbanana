@@ -1,7 +1,7 @@
 # BigBanana Fork Studio 核心交接与落地指导手册 (Project Handoff Bible)
 
 > **版本**：v1.0.0  
-> **更新时间**：2026-10-26  
+> **更新时间**：2026-10-27  
 > **适用对象**：后续接手或协作的 Lead、工程师、子 Agent 及测试验证团队  
 > **核心目标**：将 BigBanana AI Director 改造为开箱即用的「导演工作台 + 无限自由画布」纯原生双轨影视生成系统。
 
@@ -68,6 +68,13 @@ E:\all-agent-workspace\BigBanana/
   - `server/prodServer.mjs` 语法测试通过（`node --check` pass）；
   - 4 个 PowerShell 脚本已通过语法树解析校验；
   - 端口约定强固：开发态强制 5173，生产态强制 3005；生产态自动探测 `dist/` 存在性并提供友好构建引导。
+
+### 2.3 已完成切片（2026-10-27：C2 + C4 + P3）
+- **C2 数据权威（commit `b3d24fd`）**：BigBananaDB v3→v4（9 个 Object Store）；`runV3ToV4Migration` 幂等迁移（legacy `imageCanvas/videoCanvas` → `canvas_graphs`，keyframe/interval → `media_versions` v1 基线）；三导出覆盖 9 store 且按 scope 过滤，导入兼容 v2/v3 旧包。真实浏览器实测：v3 种子库打开应用后自动升至 v4，9 store 齐备，2 图与 2 条版本基线正确。
+- **C4 可生成画布（commit `b3d24fd`）**：InfiniteCanvas 解除 inspect-only；`CanvasGraphEntity` 单一真源 + 600ms 防抖 `saveCanvasGraph`；5 类节点、SVG 贝塞尔连线、自环/重复边/端点禁连/DFS 环检测、级联删边。真实浏览器 E2E：项目→分集→画布→新增配置节点→落库 nodes 0→4、edges 0→2。
+- **P3 级联清理（commit `1567e5b`）**：`deleteEpisode` 在同一读写事务中清理该分集的 `canvas_graphs` 与 `generation_tasks`，不留孤儿。
+- **质量门**：`npx tsc --noEmit=0`、`npm run check:utf8=0`、`npm run build=0`；C2/C4 独立复审 PASS；Q01–Q03 运行态 13 项 PASS；clean-room/许可证审计 PASS（零 ELv2/异构残留，15 个基线哈希一致）。
+- **验证证据（本地，未入 Git）**：`.scratch/swarm/` 下 `c2-db-report.md`、`c2-review.md`、`c4-report.md`、`c4-review.md`、`acceptance-matrix.md`、`ops-verification.md`、`license-audit.md`、`e2e-canvas-lead-report.md`、`e2e-canvas.png`。
 
 ---
 
