@@ -419,11 +419,95 @@ export const getEpisodesBySeries = async (seriesId: string): Promise<Episode[]> 
 
 export const deleteEpisode = async (id: string): Promise<void> => {
   const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(EP_STORE, 'readwrite');
-    tx.objectStore(EP_STORE).delete(id);
-    tx.oncomplete = () => resolve();
+
+  // 1. 在同一读事务按 episodeId 收集 canvas_graphs id
+  const graphIds = await new Promise<string[]>((resolve, reject) => {
+    if (!db.objectStoreNames.contains(CANVAS_GRAPH_STORE)) {
+      resolve([]);
+      return;
+    }
+    const tx = db.transaction(CANVAS_GRAPH_STORE, 'readonly');
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Read transaction aborted'));
+    const store = tx.objectStore(CANVAS_GRAPH_STORE);
+    if (store.indexNames.contains('episodeId')) {
+      const idx = store.index('episodeId');
+      const req = typeof idx.getAllKeys === 'function' ? idx.getAllKeys(id) : idx.getAll(id);
+      req.onsuccess = () => {
+        const results = (req.result as any[]) || [];
+        const ids = results
+          .map(item => (typeof item === 'string' ? item : item?.id))
+          .filter((gid): gid is string => Boolean(gid));
+        resolve(Array.from(new Set(ids)));
+      };
+      req.onerror = () => reject(req.error);
+    } else {
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const items = (req.result as CanvasGraphEntity[]) || [];
+        const ids = items
+          .filter(g => g && g.episodeId === id)
+          .map(g => g.id)
+          .filter(Boolean);
+        resolve(Array.from(new Set(ids)));
+      };
+      req.onerror = () => reject(req.error);
+    }
+  });
+
+  // 2. 在同一读写事务删除这些 graphs 及关联 generation_tasks（按 graphId），最后删 episode
+  // 禁止事务内跨事件循环 await
+  return new Promise((resolve, reject) => {
+    const storeCandidates = [CANVAS_GRAPH_STORE, GENERATION_TASK_STORE, EP_STORE];
+    const stores = storeCandidates.filter(name => db.objectStoreNames.contains(name));
+    const tx = db.transaction(stores, 'readwrite');
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
+    tx.oncomplete = () => resolve();
+
+    // 2.1 删除关联的 canvas_graphs
+    if (db.objectStoreNames.contains(CANVAS_GRAPH_STORE)) {
+      const canvasStore = tx.objectStore(CANVAS_GRAPH_STORE);
+      for (const gid of graphIds) {
+        canvasStore.delete(gid);
+      }
+    }
+
+    // 2.2 删除关联 generation_tasks（按 graphId 索引）
+    if (db.objectStoreNames.contains(GENERATION_TASK_STORE) && graphIds.length > 0) {
+      const taskStore = tx.objectStore(GENERATION_TASK_STORE);
+      if (taskStore.indexNames.contains('graphId')) {
+        const taskIdx = taskStore.index('graphId');
+        for (const gid of graphIds) {
+          const req = typeof taskIdx.getAllKeys === 'function' ? taskIdx.getAllKeys(gid) : taskIdx.getAll(gid);
+          req.onsuccess = () => {
+            const tasks = (req.result as any[]) || [];
+            for (const t of tasks) {
+              const taskId = typeof t === 'string' ? t : t?.id;
+              if (taskId) {
+                taskStore.delete(taskId);
+              }
+            }
+          };
+          req.onerror = () => reject(req.error);
+        }
+      } else {
+        const graphIdSet = new Set(graphIds);
+        const req = taskStore.getAll();
+        req.onsuccess = () => {
+          const tasks = (req.result as GenerationTaskEntity[]) || [];
+          for (const t of tasks) {
+            if (t && t.id && graphIdSet.has(t.graphId)) {
+              taskStore.delete(t.id);
+            }
+          }
+        };
+        req.onerror = () => reject(req.error);
+      }
+    }
+
+    // 2.3 最后删 episode
+    tx.objectStore(EP_STORE).delete(id);
   });
 };
 
