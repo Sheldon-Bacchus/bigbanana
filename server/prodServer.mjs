@@ -4,6 +4,7 @@ import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createMediaProxyHandler } from './mediaProxyServer.mjs';
 import { createNewApiProxyHandler } from './newApiProxyCore.mjs';
+import { createCanvasAgentBridge } from './canvasAgentBridge.mjs';
 
 /**
  * 生产静态服务器：dist/ + 同源代理。
@@ -45,6 +46,8 @@ const MIME_TYPES = new Map([
 
 const mediaProxy = createMediaProxyHandler();
 const newApiProxy = createNewApiProxyHandler();
+// 原生画布桥接：页面同源 SSE 接入，MCP 通过 Bearer Token 调用 /api/agent/rpc
+const canvasAgent = createCanvasAgentBridge({ root: ROOT, host: HOST, port: PORT });
 
 const sendJson = (res, statusCode, payload) => {
   if (res.headersSent) return;
@@ -155,6 +158,17 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (pathname.startsWith('/api/agent/')) {
+    Promise.resolve(canvasAgent.handle(req, res, pathname))
+      .then((handled) => {
+        if (!handled) sendJson(res, 404, { error: 'Unknown agent route.' });
+      })
+      .catch((error) => {
+        sendJson(res, 500, { error: String(error && error.message ? error.message : error) });
+      });
+    return;
+  }
+
   // 前缀匹配：/api/media-proxy/health 等子路径必须进入媒体代理，不能落到 SPA 静态回退
   if (pathname === '/api/media-proxy' || pathname.startsWith('/api/media-proxy/')) {
     Promise.resolve(mediaProxy(req, res)).catch(() => {
@@ -177,10 +191,12 @@ server.listen(PORT, HOST, () => {
   console.log(`[bigbanana-prod] http://${HOST}:${PORT}`);
   console.log(`[bigbanana-prod] root=${ROOT}`);
   console.log(`[bigbanana-prod] dist=${existsSync(INDEX_FILE) ? 'ready' : 'MISSING (run npm run build)'}`);
+  console.log(`[bigbanana-prod] canvas-agent state=${canvasAgent.stateFile}`);
 });
 
 const shutdown = (signal) => {
   console.log(`[bigbanana-prod] received ${signal}, closing...`);
+  canvasAgent.close();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 5000).unref();
 };

@@ -25,6 +25,13 @@ BigBanana Fork Studio
 3. 移除 Docker / nginx 部署方式，改为 Node 静态服务器 + 同源代理。
 4. 计划扩展 InfiniteCanvas 为可生成、可回写的持久化节点图（v4 schema）。
 5. 计划以 clean-room 方式实现与外部导演台的 projection / commit 契约。
+6. 新增原生画布 MCP 桥接与 stdio MCP 服务（本地、无云端依赖，见 README）。
+
+新增代码的许可
+--------------
+本仓新增的 MCP 桥接代码（server/canvasAgentBridge.mjs、server/canvasMcp.mjs、
+services/canvasAgentBridge.ts 及其文档）随本仓整体按 CC BY-NC-SA 4.0 分发：
+署名、非商业性使用、相同方式共享。
 
 保留的第三方服务
 ----------------

@@ -10,6 +10,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
+import { startCanvasAgentBridge } from './services/canvasAgentBridge';
 import { AlertProvider } from './components/GlobalAlert';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { OFFICIAL_WEBSITE_URL, CREATIVE_HOME_URL, APP_VERSION, COMPANY_NAME } from './constants/links';
@@ -45,3 +46,6 @@ root.render(
     </BrowserRouter>
   </React.StrictMode>
 );
+
+// 接入本机 3005 原生画布桥接（非 3005 端口会自行跳过）
+startCanvasAgentBridge();

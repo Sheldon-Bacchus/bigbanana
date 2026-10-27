@@ -80,3 +80,10 @@ types.ts        领域模型与画布状态
 - [ ] C5 双向互通：projection / commit / 版本与冲突
 
 规格（SDD）暂存于 `E:\all-agent-workspace\infinite-studio\specs\006-bigbanana-fork-studio`。
+
+## 原生画布 MCP（本地，无云端依赖）
+
+- `server/canvasAgentBridge.mjs`：挂在 3005 生产服务上的同源 SSE 桥接，页面直连真实 IndexedDB/OPFS。
+- `server/canvasMcp.mjs`：MCP stdio 服务，11 个工具（项目/画布/节点/资产导入/HTTP API）。
+- `services/canvasAgentBridge.ts`：浏览器侧命令处理器。
+- 文档：`docs/canvas-agent-mcp.md`、`docs/local-mcp-stack.md`。
