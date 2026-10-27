@@ -51,6 +51,7 @@ import { assessShotQualityWithLLM } from '../../services/qualityAssessmentV2Serv
 import { updatePromptWithVersion } from '../../services/promptVersionService';
 import { resolvePromptTemplateConfig } from '../../services/promptTemplateService';
 import { toFriendlyModerationMessage } from '../../services/errorMessageService';
+import { projectEpisodeToCanvas } from '../../features/interop/projectionService';
 
 interface Props {
   project: ProjectState;
@@ -73,6 +74,27 @@ const StageDirector: React.FC<Props> = ({ project, updateProject, onApiKeyError,
   const [isNineGridRevising, setIsNineGridRevising] = useState(false); // 是否正在按指令改写九宫格描述
   const [showNineGrid, setShowNineGrid] = useState(false); // 是否显示九宫格预览弹窗
   const [toastMessage, setToastMessage] = useState('');
+  const [isProjecting, setIsProjecting] = useState(false); // 是否正在执行画布投影
+
+  // C5 导演台 ➔ 画布 1:1 幂等投影服务调用
+  const handleProjectToCanvas = async (mode: 'image' | 'video' | 'all' = 'all', targetShotId?: string) => {
+    if (isProjecting) return;
+    setIsProjecting(true);
+    try {
+      const result = await projectEpisodeToCanvas(project, mode, { targetShotId });
+      if (result.createdNodeIds.length > 0) {
+        setToastMessage(`已将 ${result.createdNodeIds.length} 个新实体投影至画布并对齐时序`);
+      } else {
+        setToastMessage('画布已对齐最新状态（已聚焦目标镜头）');
+      }
+      onOpenCanvas?.(mode);
+    } catch (err) {
+      console.error('投影到画布失败:', err);
+      showAlert('投影到画布失败，请重试');
+    } finally {
+      setIsProjecting(false);
+    }
+  };
   
   // 关键帧生成使用的横竖屏比例（从持久化配置读取）
   const [keyframeAspectRatio, setKeyframeAspectRatioState] = useState<AspectRatio>(() => getUserAspectRatio());
@@ -1750,33 +1772,50 @@ const StageDirector: React.FC<Props> = ({ project, updateProject, onApiKeyError,
         </div>
 
         <div className="flex items-center gap-3">
+          {/* C5 投影到画布入口 */}
           <button
             type="button"
-            onClick={() => onOpenCanvas?.('all')}
-            className="px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wide transition-all flex items-center gap-2 bg-[var(--bg-surface)] text-[var(--text-tertiary)] border border-[var(--border-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent-border)]"
-            title="打开生图与生视频无限画布"
+            onClick={() => handleProjectToCanvas('all', activeShotId || undefined)}
+            disabled={isProjecting}
+            className="px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wide transition-all flex items-center gap-2 bg-[var(--accent-bg)] text-[var(--accent-text)] border border-[var(--accent-border)] hover:bg-[var(--accent-bg-strong)] shadow-sm active:scale-95 disabled:opacity-50"
+            title="将当前分集镜头与资产 1:1 投影至自由画布（幂等操作，不覆盖用户已有排版布局）"
           >
-            <Maximize2 className="w-3.5 h-3.5" />
-            无限画布
+            {isProjecting ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="w-3.5 h-3.5 text-[var(--accent)]" />
+            )}
+            <span>{activeShotId ? `投影镜头 #${activeShotIndex + 1}` : '投影到画布'}</span>
           </button>
           <div className="flex items-center gap-1 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)]/30 p-1">
             <button
               type="button"
-              onClick={() => onOpenCanvas?.('image')}
-              className="inline-flex items-center gap-1.5 rounded px-2 py-1.5 text-[10px] font-bold text-[var(--text-tertiary)] hover:bg-[var(--accent-bg)] hover:text-[var(--accent-text)]"
-              title="打开生图画布"
+              onClick={() => handleProjectToCanvas('image', activeShotId || undefined)}
+              disabled={isProjecting}
+              className="inline-flex items-center gap-1.5 rounded px-2 py-1.5 text-[10px] font-bold text-[var(--text-tertiary)] hover:bg-[var(--accent-bg)] hover:text-[var(--accent-text)] disabled:opacity-50"
+              title="投影至生图画布"
             >
-              <ImageIcon className="w-3 h-3" /> 生图
+              <ImageIcon className="w-3 h-3" /> 投影生图
             </button>
             <button
               type="button"
-              onClick={() => onOpenCanvas?.('video')}
-              className="inline-flex items-center gap-1.5 rounded px-2 py-1.5 text-[10px] font-bold text-[var(--text-tertiary)] hover:bg-[var(--accent-bg)] hover:text-[var(--accent-text)]"
-              title="打开生视频画布"
+              onClick={() => handleProjectToCanvas('video', activeShotId || undefined)}
+              disabled={isProjecting}
+              className="inline-flex items-center gap-1.5 rounded px-2 py-1.5 text-[10px] font-bold text-[var(--text-tertiary)] hover:bg-[var(--accent-bg)] hover:text-[var(--accent-text)] disabled:opacity-50"
+              title="投影至生视频画布"
             >
-              <VideoIcon className="w-3 h-3" /> 生视频
+              <VideoIcon className="w-3 h-3" /> 投影视频
             </button>
           </div>
+          <button
+            type="button"
+            onClick={() => onOpenCanvas?.('all')}
+            className="px-3 py-2 rounded-lg text-xs font-bold uppercase tracking-wide transition-all flex items-center gap-2 bg-[var(--bg-surface)] text-[var(--text-tertiary)] border border-[var(--border-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent-border)]"
+            title="直接打开无限画布浏览（不重新执行投影）"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+            浏览画布
+          </button>
           {/* 横竖屏选择 */}
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-[var(--text-tertiary)] uppercase">比例</span>

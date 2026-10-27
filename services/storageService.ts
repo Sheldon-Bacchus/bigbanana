@@ -752,6 +752,85 @@ export const saveMediaVersion = async (version: MediaVersionEntity): Promise<voi
   });
 };
 
+/**
+ * 原子写回（C5 复审 P1 修复）：
+ * 在同一个 [media_versions, commit_records] 读写事务内完成
+ * 1) 同槽位其它 isCurrent 版本翻转为 false
+ * 2) 写入新版本（isCurrent=true）
+ * 3) 写入提交审计记录 CommitRecord
+ * 避免多次独立事务产生“槽位无当前版本”的中间态。
+ */
+export const commitMediaVersionAtomic = async (
+  version: MediaVersionEntity,
+  record: CommitRecordEntity
+): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([MEDIA_VERSION_STORE, COMMIT_RECORD_STORE], 'readwrite');
+    const versionStore = tx.objectStore(MEDIA_VERSION_STORE);
+    const recordStore = tx.objectStore(COMMIT_RECORD_STORE);
+    const idx = versionStore.indexNames.contains('targetType_targetId')
+      ? versionStore.index('targetType_targetId')
+      : null;
+    const req = idx ? idx.getAll([version.targetType, version.targetId]) : versionStore.getAll();
+    req.onsuccess = () => {
+      const rows = ((req.result as MediaVersionEntity[]) || []).filter(
+        row => row.targetType === version.targetType && row.targetId === version.targetId
+      );
+      for (const row of rows) {
+        if (row.id !== version.id && row.isCurrent) {
+          versionStore.put({ ...row, isCurrent: false });
+        }
+      }
+      versionStore.put(version);
+      recordStore.put(record);
+    };
+    req.onerror = () => reject(req.error);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('媒体版本写回事务中止'));
+  });
+};
+
+/**
+ * 原子回滚（C5 复审 P1 修复）：同一事务内翻转该槽位 isCurrent 并写入回滚审计记录。
+ */
+export const rollbackMediaVersionAtomic = async (
+  targetType: MediaVersionEntity['targetType'],
+  targetId: string,
+  versionId: string,
+  record?: CommitRecordEntity
+): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const stores = record ? [MEDIA_VERSION_STORE, COMMIT_RECORD_STORE] : [MEDIA_VERSION_STORE];
+    const tx = db.transaction(stores, 'readwrite');
+    const versionStore = tx.objectStore(MEDIA_VERSION_STORE);
+    const idx = versionStore.indexNames.contains('targetType_targetId')
+      ? versionStore.index('targetType_targetId')
+      : null;
+    const req = idx ? idx.getAll([targetType, targetId]) : versionStore.getAll();
+    req.onsuccess = () => {
+      const rows = ((req.result as MediaVersionEntity[]) || []).filter(
+        row => row.targetType === targetType && row.targetId === targetId
+      );
+      for (const row of rows) {
+        const shouldBeCurrent = row.id === versionId;
+        if (row.isCurrent !== shouldBeCurrent) {
+          versionStore.put({ ...row, isCurrent: shouldBeCurrent });
+        }
+      }
+      if (record) {
+        tx.objectStore(COMMIT_RECORD_STORE).put(record);
+      }
+    };
+    req.onerror = () => reject(req.error);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('版本回滚事务中止'));
+  });
+};
+
 export const listCommitRecords = async (targetId: string): Promise<CommitRecordEntity[]> => {
   const db = await openDB();
   return new Promise((resolve, reject) => {

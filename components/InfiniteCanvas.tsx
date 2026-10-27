@@ -1,5 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle } from 'lucide-react';
+import {
+  AlertCircle,
+  CheckSquare,
+  History,
+  Layers,
+  Square,
+  Upload,
+} from 'lucide-react';
 import {
   CanvasEdgeEntity,
   CanvasGraphEntity,
@@ -25,12 +32,15 @@ import {
   buildInitialCanvasGraph,
   calculateHandlePosition,
   generateStableId,
+  getNodeDimensions,
   mergeGraphWithProject,
   validateNewEdge,
 } from './canvas/canvasGraphUtils';
 import { CanvasNodeCard } from './canvas/CanvasNodeCard';
 import { CanvasEdgeLayer } from './canvas/CanvasEdgeLayer';
 import { CanvasToolbar } from './canvas/CanvasToolbar';
+import { CommitDialog, CommitDialogTarget } from '../features/interop/CommitDialog';
+import { VersionHistoryPanel } from '../features/interop/VersionHistoryPanel';
 
 interface InfiniteCanvasProps {
   project: ProjectState;
@@ -57,6 +67,16 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
   const [connectingState, setConnectingState] = useState<ConnectingState | null>(null);
+
+  // C5: 写回弹窗与版本历史面板状态
+  const [commitDialogTargets, setCommitDialogTargets] = useState<CommitDialogTarget[] | null>(null);
+  const [versionHistoryTarget, setVersionHistoryTarget] = useState<{
+    targetType: 'keyframe' | 'interval';
+    targetId: string;
+    shotId?: string;
+    shotTitle?: string;
+  } | null>(null);
+  const [selectedArtifactIds, setSelectedArtifactIds] = useState<Set<string>>(new Set());
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -514,6 +534,139 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
     (node) => node.type === 'artifact_output'
   ).length;
 
+  // C5: 构造单个产物节点的 CommitDialogTarget
+  const buildTargetForNode = useCallback(
+    (node: CanvasNodeEntity): CommitDialogTarget | null => {
+      const shotId = String(node.data?.shotId || node.sourceRef?.shotId || '');
+      const shot = (project.shots || []).find((s) => s.id === shotId);
+      const mediaType: 'image' | 'video' = node.data?.mediaType === 'video' ? 'video' : 'image';
+      const candidateRef = String(
+        (mediaType === 'video' ? node.data?.videoUrl : node.data?.imageUrl) || ''
+      );
+
+      if (!candidateRef) return null;
+
+      let targetType: 'keyframe' | 'interval' = 'keyframe';
+      let targetId = '';
+      let currentRef: string | undefined;
+
+      if (mediaType === 'video') {
+        targetType = 'interval';
+        targetId = shot?.id || shotId || node.id;
+        currentRef = shot?.interval?.videoUrl;
+      } else {
+        targetType = 'keyframe';
+        const startFrame = shot?.keyframes?.find((k) => k.type === 'start') || shot?.keyframes?.[0];
+        targetId = startFrame?.id || `kf-${shotId}-start`;
+        currentRef = startFrame?.imageUrl;
+      }
+
+      const shotIndex = (project.shots || []).findIndex((s) => s.id === shotId);
+      const shotTitle =
+        shotIndex >= 0 ? `SHOT ${String(shotIndex + 1).padStart(3, '0')}` : (shotId || '镜头');
+
+      return {
+        episodeId: project.id,
+        shotId,
+        targetType,
+        targetId,
+        mediaType,
+        candidateRef,
+        currentRef,
+        sourceNodeId: node.id,
+        shotTitle,
+        promptSnapshot: String(node.data?.subtitle || node.data?.prompt || ''),
+      };
+    },
+    [project]
+  );
+
+  // C5: 打开单节点写回弹窗
+  const handleOpenCommitForNode = useCallback(
+    (node: CanvasNodeEntity) => {
+      const target = buildTargetForNode(node);
+      if (!target) {
+        showNotification('当前产物尚未就绪或媒体内容为空，无法写回');
+        return;
+      }
+      setCommitDialogTargets([target]);
+    },
+    [buildTargetForNode, showNotification]
+  );
+
+  // C5: 打开版本历史面板
+  const handleOpenVersionHistoryForNode = useCallback(
+    (node: CanvasNodeEntity) => {
+      const shotId = String(node.data?.shotId || node.sourceRef?.shotId || '');
+      const shot = (project.shots || []).find((s) => s.id === shotId);
+      const mediaType: 'image' | 'video' = node.data?.mediaType === 'video' ? 'video' : 'image';
+      const targetType: 'keyframe' | 'interval' = mediaType === 'video' ? 'interval' : 'keyframe';
+      let targetId = '';
+      if (mediaType === 'video') {
+        targetId = shot?.id || shotId || node.id;
+      } else {
+        const startFrame = shot?.keyframes?.find((k) => k.type === 'start') || shot?.keyframes?.[0];
+        targetId = startFrame?.id || `kf-${shotId}-start`;
+      }
+      const shotIndex = (project.shots || []).findIndex((s) => s.id === shotId);
+      const shotTitle = shotIndex >= 0 ? `SHOT ${String(shotIndex + 1).padStart(3, '0')}` : shotId;
+
+      setVersionHistoryTarget({
+        targetType,
+        targetId,
+        shotId,
+        shotTitle,
+      });
+    },
+    [project]
+  );
+
+  // C5: 批量勾选切换
+  const handleToggleArtifactSelection = useCallback((nodeId: string) => {
+    setSelectedArtifactIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) {
+        next.delete(nodeId);
+      } else {
+        next.add(nodeId);
+      }
+      return next;
+    });
+  }, []);
+
+  // C5: 统计所有已生成媒体的产物节点
+  const artifactsWithMedia = useMemo(() => {
+    return (graph?.nodes || []).filter(
+      (node) =>
+        node.type === 'artifact_output' &&
+        Boolean(node.data?.imageUrl || node.data?.videoUrl)
+    );
+  }, [graph?.nodes]);
+
+  // C5: 打开批量写回弹窗
+  const handleBatchCommitOpen = useCallback(() => {
+    const selectedNodes = (graph?.nodes || []).filter(
+      (node) => node.type === 'artifact_output' && selectedArtifactIds.has(node.id)
+    );
+    const targets = selectedNodes
+      .map(buildTargetForNode)
+      .filter((t): t is CommitDialogTarget => Boolean(t));
+
+    if (targets.length === 0) {
+      showNotification('未选择任何有效的已生成产物');
+      return;
+    }
+    setCommitDialogTargets(targets);
+  }, [graph?.nodes, selectedArtifactIds, buildTargetForNode, showNotification]);
+
+  const handleSelectAllArtifacts = useCallback(() => {
+    if (selectedArtifactIds.size === artifactsWithMedia.length) {
+      setSelectedArtifactIds(new Set());
+    } else {
+      setSelectedArtifactIds(new Set(artifactsWithMedia.map((n) => n.id)));
+    }
+  }, [selectedArtifactIds.size, artifactsWithMedia]);
+
   return (
     <div className="absolute inset-0 z-[60] flex min-w-0 flex-col bg-[var(--bg-secondary)] text-[var(--text-secondary)] select-none">
       {/* 顶部工具栏 */}
@@ -541,6 +694,31 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-lg border border-[var(--warning-border)] bg-[var(--warning-bg)]/95 px-4 py-2 text-xs font-medium text-[var(--warning-text)] shadow-xl backdrop-blur animate-in fade-in slide-in-from-top-2 duration-200">
           <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
           <span>{notification}</span>
+        </div>
+      )}
+
+      {/* C5: 批量写回快捷浮动工具条 */}
+      {artifactsWithMedia.length > 1 && (
+        <div className="absolute top-16 right-4 z-40 flex items-center gap-2.5 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-elevated)]/95 px-3 py-2 shadow-xl backdrop-blur">
+          <span className="text-[11px] text-[var(--text-secondary)]">
+            已勾选 <strong className="text-[var(--accent-text)]">{selectedArtifactIds.size}</strong> / {artifactsWithMedia.length} 产物
+          </span>
+          <button
+            type="button"
+            onClick={handleSelectAllArtifacts}
+            className="text-[10px] text-[var(--accent-text)] hover:underline font-medium"
+          >
+            {selectedArtifactIds.size === artifactsWithMedia.length ? '取消全选' : '全选'}
+          </button>
+          <button
+            type="button"
+            onClick={handleBatchCommitOpen}
+            disabled={selectedArtifactIds.size === 0}
+            className="flex items-center gap-1 rounded-lg bg-[var(--accent)] px-2.5 py-1 text-xs font-bold text-white shadow hover:opacity-90 transition-all active:scale-95 disabled:opacity-40"
+          >
+            <Layers className="h-3.5 w-3.5" />
+            <span>批量写回 ({selectedArtifactIds.size})</span>
+          </button>
         </div>
       )}
 
@@ -600,45 +778,109 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
             />
 
             {/* 节点层 */}
-            {(graph?.nodes || []).map((node) => (
-              <CanvasNodeCard
-                key={node.id}
-                node={node}
-                selected={selectedNodeId === node.id}
-                onSelect={() => {
-                  setSelectedNodeId(node.id);
-                  setSelectedEdgeId(null);
-                }}
-                onDelete={() => {
-                  updateGraph((prev) => {
-                    const remainingNodes = prev.nodes.filter((n) => n.id !== node.id);
-                    const remainingEdges = prev.edges.filter(
-                      (e) => e.sourceNodeId !== node.id && e.targetNodeId !== node.id
-                    );
-                    const remainingPositions = { ...(prev.legacyNodePositions || {}) };
-                    delete remainingPositions[node.id];
-                    return {
-                      ...prev,
-                      nodes: remainingNodes,
-                      edges: remainingEdges,
-                      legacyNodePositions: remainingPositions,
-                    };
-                  });
-                  if (selectedNodeId === node.id) setSelectedNodeId(null);
-                }}
-                onOpenShot={onOpenShot}
-                onUpdateData={(patch) => {
-                  updateGraph((prev) => ({
-                    ...prev,
-                    nodes: prev.nodes.map((n) =>
-                      n.id === node.id ? { ...n, data: { ...n.data, ...patch } } : n
-                    ),
-                  }));
-                }}
-                onPointerDown={(event) => handleNodePointerDown(node, event)}
-                onStartConnecting={handleStartConnecting}
-              />
-            ))}
+            {(graph?.nodes || []).map((node) => {
+              const { width, height } = getNodeDimensions(node);
+              const isArtifact = node.type === 'artifact_output';
+              const hasMedia = Boolean(node.data?.imageUrl || node.data?.videoUrl);
+              const isChecked = selectedArtifactIds.has(node.id);
+
+              return (
+                <React.Fragment key={node.id}>
+                  <CanvasNodeCard
+                    node={node}
+                    selected={selectedNodeId === node.id}
+                    onSelect={() => {
+                      setSelectedNodeId(node.id);
+                      setSelectedEdgeId(null);
+                    }}
+                    onDelete={() => {
+                      updateGraph((prev) => {
+                        const remainingNodes = prev.nodes.filter((n) => n.id !== node.id);
+                        const remainingEdges = prev.edges.filter(
+                          (e) => e.sourceNodeId !== node.id && e.targetNodeId !== node.id
+                        );
+                        const remainingPositions = { ...(prev.legacyNodePositions || {}) };
+                        delete remainingPositions[node.id];
+                        return {
+                          ...prev,
+                          nodes: remainingNodes,
+                          edges: remainingEdges,
+                          legacyNodePositions: remainingPositions,
+                        };
+                      });
+                      if (selectedNodeId === node.id) setSelectedNodeId(null);
+                    }}
+                    onOpenShot={onOpenShot}
+                    onUpdateData={(patch) => {
+                      updateGraph((prev) => ({
+                        ...prev,
+                        nodes: prev.nodes.map((n) =>
+                          n.id === node.id ? { ...n, data: { ...n.data, ...patch } } : n
+                        ),
+                      }));
+                    }}
+                    onPointerDown={(event) => handleNodePointerDown(node, event)}
+                    onStartConnecting={handleStartConnecting}
+                  />
+
+                  {/* C5: 产物节点操作条：写回导演台、版本历史与批量勾选 */}
+                  {isArtifact && (
+                    <div
+                      data-canvas-action="true"
+                      className="absolute z-20 flex items-center gap-1.5"
+                      style={{
+                        left: node.position.x,
+                        top: node.position.y + height + 6,
+                        width,
+                      }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    >
+                      {/* 多选勾选框 */}
+                      {hasMedia && (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleArtifactSelection(node.id)}
+                          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border shadow-sm transition-all active:scale-95 ${
+                            isChecked
+                              ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                              : 'border-[var(--border-primary)] bg-[var(--bg-elevated)]/90 text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:border-[var(--border-secondary)]'
+                          }`}
+                          title={isChecked ? '取消多选勾选' : '勾选加入批量写回'}
+                        >
+                          {isChecked ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
+                        </button>
+                      )}
+
+                      {/* 写回导演台主要按钮 */}
+                      <button
+                        type="button"
+                        disabled={!hasMedia}
+                        onClick={() => handleOpenCommitForNode(node)}
+                        className={`flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg py-1.5 px-2.5 text-xs font-bold shadow-md backdrop-blur transition-all active:scale-95 ${
+                          hasMedia
+                            ? 'bg-[var(--accent)] hover:opacity-95 text-white ring-1 ring-white/10'
+                            : 'bg-[var(--bg-elevated)]/80 border border-[var(--border-primary)] text-[var(--text-muted)] cursor-not-allowed opacity-60'
+                        }`}
+                        title={hasMedia ? '将此产物安全写回导演台对应槽位' : '产物尚未生成，无法写回'}
+                      >
+                        <Upload className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">写回导演台</span>
+                      </button>
+
+                      {/* 历史版本栈按钮 */}
+                      <button
+                        type="button"
+                        onClick={() => handleOpenVersionHistoryForNode(node)}
+                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--border-primary)] bg-[var(--bg-elevated)]/90 hover:bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-amber-400 shadow-sm transition-colors"
+                        title="查看历史版本栈与回滚"
+                      >
+                        <History className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </div>
         </div>
 
@@ -721,6 +963,29 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
                   前往对应镜头工作台 →
                 </button>
               )}
+
+              {/* C5: 产物节点快捷写回与历史 */}
+              {selectedNode.type === 'artifact_output' && (
+                <div className="pt-2 border-t border-[var(--border-primary)]/50 space-y-2">
+                  <button
+                    type="button"
+                    disabled={!selectedNode.data?.imageUrl && !selectedNode.data?.videoUrl}
+                    onClick={() => handleOpenCommitForNode(selectedNode)}
+                    className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-[var(--accent)] py-1.5 text-xs font-bold text-white shadow hover:opacity-90 transition-all disabled:opacity-40"
+                  >
+                    <Upload className="h-3.5 w-3.5" />
+                    写回导演台
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenVersionHistoryForNode(selectedNode)}
+                    className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-surface)] py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:text-amber-400 transition-colors"
+                  >
+                    <History className="h-3.5 w-3.5" />
+                    查看版本历史栈
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -744,6 +1009,34 @@ const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
           )}
         </aside>
       </div>
+
+      {/* C5: 提交写回确认弹窗 */}
+      {commitDialogTargets && (
+        <CommitDialog
+          isOpen={Boolean(commitDialogTargets)}
+          onClose={() => setCommitDialogTargets(null)}
+          items={commitDialogTargets}
+          onSuccess={() => {
+            showNotification('产物已成功写回导演台，旧版本已安全归档至历史栈');
+            setSelectedArtifactIds(new Set());
+          }}
+        />
+      )}
+
+      {/* C5: 版本历史栈与回滚面板 */}
+      {versionHistoryTarget && (
+        <VersionHistoryPanel
+          isOpen={Boolean(versionHistoryTarget)}
+          onClose={() => setVersionHistoryTarget(null)}
+          targetType={versionHistoryTarget.targetType}
+          targetId={versionHistoryTarget.targetId}
+          shotId={versionHistoryTarget.shotId}
+          shotTitle={versionHistoryTarget.shotTitle}
+          onRollbackSuccess={() => {
+            showNotification('分镜槽位已成功回滚至指定历史版本');
+          }}
+        />
+      )}
     </div>
   );
 };

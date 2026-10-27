@@ -600,6 +600,14 @@ export interface CommitRecordEntity {
   timestamp: number;
 }
 
+export interface ProjectionRecordEntity {
+  id: string; // proj-<uuid>
+  episodeId: string;
+  shotId: string;
+  canvasNodeId: string;
+  mappedAt: number;
+}
+
 
 // ============================================
 // 模型管理相关类型定义
